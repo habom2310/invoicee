@@ -1,0 +1,314 @@
+import Foundation
+#if canImport(SwiftUI)
+import SwiftUI
+#endif
+#if canImport(Vision)
+import Vision
+#endif
+#if canImport(VisionKit)
+import VisionKit
+#endif
+#if canImport(UIKit)
+import UIKit
+#endif
+
+enum InvoiceOCRError: LocalizedError {
+    case unavailable
+    case invalidImage
+    case recognitionFailed
+    case scanCancelled
+
+    var errorDescription: String? {
+        switch self {
+        case .unavailable:
+            return "Invoice OCR is not available on this device."
+        case .invalidImage:
+            return "The scanned image could not be processed."
+        case .recognitionFailed:
+            return "Unable to extract text from the invoice."
+        case .scanCancelled:
+            return "Scan cancelled."
+        }
+    }
+}
+
+struct InvoiceOCRResult {
+    var data: ManualInvoiceData
+    var rawLines: [String]
+}
+
+enum InvoiceOCRProcessor {
+#if canImport(Vision) && canImport(UIKit)
+    static func process(image: UIImage) async throws -> InvoiceOCRResult {
+        guard let cgImage = image.cgImage else {
+            throw InvoiceOCRError.invalidImage
+        }
+
+        let request = VNRecognizeTextRequest()
+        request.recognitionLevel = .accurate
+        request.usesLanguageCorrection = true
+        request.revision = VNRecognizeTextRequestRevision3
+
+        let handler = VNImageRequestHandler(cgImage: cgImage, options: [:])
+        try handler.perform([request])
+
+        guard let observations = request.results as? [VNRecognizedTextObservation], !observations.isEmpty else {
+            throw InvoiceOCRError.recognitionFailed
+        }
+
+        let entries = observations.compactMap { RecognizedEntry(observation: $0) }
+        let lines = entries.map { $0.text }
+
+        var data = ManualInvoiceData()
+        data.supplier = lines.first ?? ""
+        if let detectedDate = findDate(in: entries) {
+            data.date = detectedDate
+        }
+
+        let priceRegex = currencyRegex
+        var usedPriceIDs = Set<UUID>()
+
+        if let total = findTotalAmount(in: entries, priceRegex: priceRegex) {
+            data.totalAmount = total.price
+            usedPriceIDs.insert(total.priceEntryID)
+        }
+
+        let itemExtraction = extractLineItems(from: entries, priceRegex: priceRegex, excludingPriceIDs: usedPriceIDs)
+        data.items = itemExtraction.items
+        usedPriceIDs.formUnion(itemExtraction.usedPriceIDs)
+
+        if data.totalAmount.isEmpty,
+           let fallback = fallbackTotal(from: entries, excludingPriceIDs: usedPriceIDs, priceRegex: priceRegex) {
+            data.totalAmount = fallback
+        }
+
+        return InvoiceOCRResult(data: data, rawLines: lines)
+    }
+
+    private static func findDate(in entries: [RecognizedEntry]) -> Date? {
+        let patterns = [
+            #"\b\d{1,2}[/-]\d{1,2}[/-]\d{2,4}\b"#,
+            #"\b\d{4}[/-]\d{1,2}[/-]\d{1,2}\b"#
+        ]
+
+        for entry in entries {
+            for pattern in patterns {
+                if let dateString = firstMatch(in: entry.text, pattern: pattern),
+                   let parsed = parseDate(from: dateString) {
+                    return parsed
+                }
+            }
+        }
+
+        return nil
+    }
+
+    private static func extractLineItems(from entries: [RecognizedEntry],
+                                         priceRegex: NSRegularExpression,
+                                         excludingPriceIDs: Set<UUID>) -> (items: [ManualInvoiceItem], usedPriceIDs: Set<UUID>) {
+        let rowThreshold: CGFloat = 0.02
+        var usedPriceIDs = excludingPriceIDs
+        var items: [ManualInvoiceItem] = []
+
+        let priceEntries = entries.filter { entry in
+            !usedPriceIDs.contains(entry.id) && matchesCurrency(entry.text, regex: priceRegex)
+        }
+
+        for priceEntry in priceEntries.sorted(by: { $0.boundingBox.midY > $1.boundingBox.midY }) {
+            guard let amount = sanitizeCurrency(from: priceEntry.text, using: priceRegex) else { continue }
+
+            let candidateNames = entries
+                .filter { $0.boundingBox.midX < priceEntry.boundingBox.midX && abs($0.boundingBox.midY - priceEntry.boundingBox.midY) < rowThreshold }
+                .filter { nameEntry in
+                    let lower = nameEntry.text.lowercased()
+                    return !lower.contains("total") && !lower.contains("subtotal") && !lower.contains("tax") && !lower.contains("gst")
+                }
+                .sorted { lhs, rhs in
+                    let lhsDiff = abs(lhs.boundingBox.midY - priceEntry.boundingBox.midY)
+                    let rhsDiff = abs(rhs.boundingBox.midY - priceEntry.boundingBox.midY)
+                    if lhsDiff == rhsDiff {
+                        return (priceEntry.boundingBox.minX - lhs.boundingBox.maxX) < (priceEntry.boundingBox.minX - rhs.boundingBox.maxX)
+                    }
+                    return lhsDiff < rhsDiff
+                }
+
+            guard let nameEntry = candidateNames.first else { continue }
+
+            var item = ManualInvoiceItem()
+            item.name = nameEntry.text
+            item.totalAmount = amount
+            items.append(item)
+            usedPriceIDs.insert(priceEntry.id)
+        }
+
+        return (items, usedPriceIDs)
+    }
+
+    private static func findTotalAmount(in entries: [RecognizedEntry], priceRegex: NSRegularExpression) -> (price: String, priceEntryID: UUID)? {
+        let rowThreshold: CGFloat = 0.025
+        let labelCandidates = entries.filter { entry in
+            let lower = entry.text.lowercased()
+            return lower.contains("total") || lower.contains("amount due") || lower.contains("balance")
+        }
+
+        let priceEntries = entries.filter { matchesCurrency($0.text, regex: priceRegex) }
+        var bestMatch: (price: String, priceEntryID: UUID, y: CGFloat)?
+
+        for label in labelCandidates {
+            let priceMatch = priceEntries
+                .filter { abs($0.boundingBox.midY - label.boundingBox.midY) < rowThreshold }
+                .sorted { abs($0.boundingBox.midY - label.boundingBox.midY) < abs($1.boundingBox.midY - label.boundingBox.midY) }
+                .first
+
+            guard let priceEntry = priceMatch,
+                  let amount = sanitizeCurrency(from: priceEntry.text, using: priceRegex) else { continue }
+
+            let candidate = (price: amount, priceEntryID: priceEntry.id, y: priceEntry.boundingBox.minY)
+            if bestMatch == nil || candidate.y < bestMatch!.y {
+                bestMatch = candidate
+            }
+        }
+
+        return bestMatch.map { ($0.price, $0.priceEntryID) }
+    }
+
+    private static func fallbackTotal(from entries: [RecognizedEntry],
+                                       excludingPriceIDs: Set<UUID>,
+                                       priceRegex: NSRegularExpression) -> String? {
+        let priceEntries = entries
+            .filter { !excludingPriceIDs.contains($0.id) && matchesCurrency($0.text, regex: priceRegex) }
+            .sorted { $0.boundingBox.minY < $1.boundingBox.minY } // nearer bottom first
+
+        for entry in priceEntries {
+            if let amount = sanitizeCurrency(from: entry.text, using: priceRegex) {
+                return amount
+            }
+        }
+        return nil
+    }
+
+    private static func matchesCurrency(_ text: String, regex: NSRegularExpression) -> Bool {
+        let range = NSRange(location: 0, length: text.utf16.count)
+        return regex.firstMatch(in: text, options: [], range: range) != nil
+    }
+
+    private static func sanitizeCurrency(from text: String, using regex: NSRegularExpression) -> String? {
+        let range = NSRange(location: 0, length: text.utf16.count)
+        guard let match = regex.firstMatch(in: text, options: [], range: range) else { return nil }
+        if let swiftRange = Range(match.range, in: text) {
+            return text[swiftRange].replacingOccurrences(of: " ", with: "")
+        }
+        return nil
+    }
+
+    private static func firstMatch(in line: String, pattern: String) -> String? {
+        guard let regex = try? NSRegularExpression(pattern: pattern, options: []) else { return nil }
+        let range = NSRange(location: 0, length: line.utf16.count)
+        guard let match = regex.firstMatch(in: line, options: [], range: range) else { return nil }
+        if let swiftRange = Range(match.range, in: line) {
+            return String(line[swiftRange])
+        }
+        return nil
+    }
+
+    private static func parseDate(from string: String) -> Date? {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+
+        let formats = [
+            "MM/dd/yyyy",
+            "MM/dd/yy",
+            "dd/MM/yyyy",
+            "dd/MM/yy",
+            "yyyy/MM/dd",
+            "yyyy-MM-dd",
+            "MM-dd-yyyy",
+            "dd-MM-yyyy"
+        ]
+
+        for format in formats {
+            formatter.dateFormat = format
+            if let date = formatter.date(from: string) {
+                return date
+            }
+        }
+
+        return nil
+    }
+
+    private static let currencyRegex: NSRegularExpression = {
+        let pattern = #"\$?\s*(\d{1,3}(,\d{3})*|\d+)(\.\d{2})?"#
+        return try! NSRegularExpression(pattern: pattern, options: [])
+    }()
+#else
+    static func process(image: Any) async throws -> InvoiceOCRResult {
+        throw InvoiceOCRError.unavailable
+    }
+#endif
+}
+
+#if canImport(Vision)
+private struct RecognizedEntry {
+    let id = UUID()
+    let text: String
+    let boundingBox: CGRect
+
+    init?(observation: VNRecognizedTextObservation) {
+        guard let candidate = observation.topCandidates(1).first else { return nil }
+        let trimmed = candidate.string.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        self.text = trimmed
+        self.boundingBox = observation.boundingBox
+    }
+}
+#endif
+
+#if canImport(VisionKit) && canImport(SwiftUI)
+struct DocumentScannerView: UIViewControllerRepresentable {
+    var completion: (Result<UIImage, Error>) -> Void
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(completion: completion)
+    }
+
+    func makeUIViewController(context: Context) -> VNDocumentCameraViewController {
+        let controller = VNDocumentCameraViewController()
+        controller.delegate = context.coordinator
+        return controller
+    }
+
+    func updateUIViewController(_ uiViewController: VNDocumentCameraViewController, context: Context) {}
+
+    final class Coordinator: NSObject, VNDocumentCameraViewControllerDelegate {
+        private let completion: (Result<UIImage, Error>) -> Void
+
+        init(completion: @escaping (Result<UIImage, Error>) -> Void) {
+            self.completion = completion
+        }
+
+        func documentCameraViewControllerDidCancel(_ controller: VNDocumentCameraViewController) {
+            controller.dismiss(animated: true) {
+                self.completion(.failure(InvoiceOCRError.scanCancelled))
+            }
+        }
+
+        func documentCameraViewController(_ controller: VNDocumentCameraViewController, didFailWithError error: Error) {
+            controller.dismiss(animated: true) {
+                self.completion(.failure(error))
+            }
+        }
+
+        func documentCameraViewController(_ controller: VNDocumentCameraViewController, didFinishWith scan: VNDocumentCameraScan) {
+            controller.dismiss(animated: true) {
+                guard scan.pageCount > 0 else {
+                    self.completion(.failure(InvoiceOCRError.invalidImage))
+                    return
+                }
+
+                let image = scan.imageOfPage(at: 0)
+                self.completion(.success(image))
+            }
+        }
+    }
+}
+#endif
