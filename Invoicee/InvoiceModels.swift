@@ -22,7 +22,8 @@ struct CapturedInvoice: Identifiable {
 
     var id = UUID()
     var supplier: String
-    var total: String
+    var total: Decimal
+    var gst: Decimal
     var date: Date
     let method: Method
     var category: String?
@@ -30,25 +31,29 @@ struct CapturedInvoice: Identifiable {
     var imageData: Data?
 
     var formattedDate: String {
-        date.formatted(date: .abbreviated, time: .omitted)
+        date.formattedInvoiceDate()
     }
 
     var displayTotal: String {
-        let trimmed = total.trimmed
-        return trimmed.isEmpty ? "—" : trimmed
+        total.formattedCurrency()
+    }
+
+    var displayGST: String {
+        gst.formattedCurrency()
     }
 }
 
 struct ManualInvoiceData {
     var supplier: String = ""
-    var totalAmount: String = ""
+    var totalAmount: Decimal?
+    var gstAmount: Decimal?
     var selectedCategory: String?
     var newCategory: String = ""
     var date: Date = .now
     var items: [ManualInvoiceItem] = []
 
     var isValid: Bool {
-        !supplier.trimmed.isEmpty && !totalAmount.trimmed.isEmpty
+        !supplier.trimmed.isEmpty && totalAmount != nil
     }
 
     mutating func addItem() {
@@ -62,5 +67,4 @@ struct ManualInvoiceItem: Identifiable {
     var quantity: String = ""
     var unitPrice: String = ""
     var totalAmount: String = ""
-    var gst: String = ""
 }

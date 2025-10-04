@@ -1,4 +1,5 @@
 import SwiftUI
+import Foundation
 
 extension Color {
     static var invoiceBackground: Color {
@@ -37,13 +38,43 @@ extension String {
                 result.append(character)
             } else if allowDecimal && character == "." && !hasDecimalSeparator {
                 hasDecimalSeparator = true
-                if result.isEmpty {
-                    result = "0"
-                }
                 result.append(character)
             }
         }
 
         return result
+    }
+}
+
+extension NumberFormatter {
+    static let currency: NumberFormatter = {
+        let formatter = NumberFormatter()
+        formatter.numberStyle = .currency
+        formatter.maximumFractionDigits = 2
+        formatter.minimumFractionDigits = 2
+        return formatter
+    }()
+}
+
+extension Decimal {
+    init?(string: String) {
+        self.init(string: string, locale: Locale(identifier: "en_US_POSIX"))
+    }
+
+    func formattedCurrency() -> String {
+        NumberFormatter.currency.string(from: NSDecimalNumber(decimal: self)) ?? ""
+    }
+
+    var plainString: String {
+        NSDecimalNumber(decimal: self).stringValue
+    }
+}
+
+extension Date {
+    func formattedInvoiceDate() -> String {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.dateFormat = "dd-MM-yyyy"
+        return formatter.string(from: self)
     }
 }

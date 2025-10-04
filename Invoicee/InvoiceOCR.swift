@@ -69,7 +69,7 @@ enum InvoiceOCRProcessor {
         var usedPriceIDs = Set<UUID>()
 
         if let total = findTotalAmount(in: entries, priceRegex: priceRegex) {
-            data.totalAmount = total.price
+            data.totalAmount = total.amount
             usedPriceIDs.insert(total.priceEntryID)
         }
 
@@ -77,7 +77,13 @@ enum InvoiceOCRProcessor {
         data.items = itemExtraction.items
         usedPriceIDs.formUnion(itemExtraction.usedPriceIDs)
 
-        if data.totalAmount.isEmpty,
+        if data.gstAmount == nil,
+           let gst = findGSTAmount(in: entries, priceRegex: priceRegex, usedPriceIDs: usedPriceIDs) {
+            data.gstAmount = gst.amount
+            usedPriceIDs.insert(gst.priceEntryID)
+        }
+
+        if data.totalAmount == nil,
            let fallback = fallbackTotal(from: entries, excludingPriceIDs: usedPriceIDs, priceRegex: priceRegex) {
             data.totalAmount = fallback
         }
@@ -111,17 +117,24 @@ enum InvoiceOCRProcessor {
         var items: [ManualInvoiceItem] = []
 
         let priceEntries = entries.filter { entry in
-            !usedPriceIDs.contains(entry.id) && matchesCurrency(entry.text, regex: priceRegex)
+            !usedPriceIDs.contains(entry.id) &&
+            matchesCurrency(entry.text, regex: priceRegex) &&
+            entry.text.contains("$")
         }
 
         for priceEntry in priceEntries.sorted(by: { $0.boundingBox.midY > $1.boundingBox.midY }) {
             guard let amount = sanitizeCurrency(from: priceEntry.text, using: priceRegex) else { continue }
 
-            let candidateNames = entries
-                .filter { $0.boundingBox.midX < priceEntry.boundingBox.midX && abs($0.boundingBox.midY - priceEntry.boundingBox.midY) < rowThreshold }
+            let sameRowEntries = entries.filter { abs($0.boundingBox.midY - priceEntry.boundingBox.midY) < rowThreshold }
+
+            let candidateNames = sameRowEntries
+                .filter { $0.boundingBox.midX < priceEntry.boundingBox.midX }
                 .filter { nameEntry in
                     let lower = nameEntry.text.lowercased()
-                    return !lower.contains("total") && !lower.contains("subtotal") && !lower.contains("tax") && !lower.contains("gst")
+                    let containsDollar = nameEntry.text.contains("$")
+                    return !containsDollar &&
+                        !matchesUnitPrice(nameEntry.text) &&
+                        !lower.contains("total") && !lower.contains("subtotal") && !lower.contains("tax") && !lower.contains("gst")
                 }
                 .sorted { lhs, rhs in
                     let lhsDiff = abs(lhs.boundingBox.midY - priceEntry.boundingBox.midY)
@@ -134,9 +147,14 @@ enum InvoiceOCRProcessor {
 
             guard let nameEntry = candidateNames.first else { continue }
 
+            let unitPriceEntry = sameRowEntries.first { matchesUnitPrice($0.text) }
+
             var item = ManualInvoiceItem()
             item.name = nameEntry.text
             item.totalAmount = amount
+            if let unitPriceEntry = unitPriceEntry {
+                item.unitPrice = unitPriceEntry.text
+            }
             items.append(item)
             usedPriceIDs.insert(priceEntry.id)
         }
@@ -144,7 +162,39 @@ enum InvoiceOCRProcessor {
         return (items, usedPriceIDs)
     }
 
-    private static func findTotalAmount(in entries: [RecognizedEntry], priceRegex: NSRegularExpression) -> (price: String, priceEntryID: UUID)? {
+    private static func findGSTAmount(in entries: [RecognizedEntry],
+                                      priceRegex: NSRegularExpression,
+                                      usedPriceIDs: Set<UUID>) -> (amount: Decimal, priceEntryID: UUID)? {
+        let rowThreshold: CGFloat = 0.02
+        let horizontalTolerance: CGFloat = 0.02
+        let labelCandidates = entries.filter { entry in
+            let lower = entry.text.lowercased()
+            return lower.contains("gst") || lower.contains("tax")
+        }
+
+        guard !labelCandidates.isEmpty else { return nil }
+
+        let priceEntries = entries.filter { !usedPriceIDs.contains($0.id) && matchesCurrency($0.text, regex: priceRegex) }
+
+        for label in labelCandidates {
+            let candidates = priceEntries.filter { entry in
+                abs(entry.boundingBox.midY - label.boundingBox.midY) < rowThreshold &&
+                entry.boundingBox.minX > label.boundingBox.midX - horizontalTolerance
+            }
+
+            if let priceEntry = candidates.min(by: { lhs, rhs in
+                abs(lhs.boundingBox.midY - label.boundingBox.midY) < abs(rhs.boundingBox.midY - label.boundingBox.midY)
+            }),
+               let amountText = sanitizeCurrency(from: priceEntry.text, using: priceRegex),
+               let decimalAmount = decimal(from: amountText) {
+                return (decimalAmount, priceEntry.id)
+            }
+        }
+
+        return nil
+    }
+
+    private static func findTotalAmount(in entries: [RecognizedEntry], priceRegex: NSRegularExpression) -> (amount: Decimal, priceEntryID: UUID)? {
         let rowThreshold: CGFloat = 0.025
         let labelCandidates = entries.filter { entry in
             let lower = entry.text.lowercased()
@@ -152,36 +202,42 @@ enum InvoiceOCRProcessor {
         }
 
         let priceEntries = entries.filter { matchesCurrency($0.text, regex: priceRegex) }
-        var bestMatch: (price: String, priceEntryID: UUID, y: CGFloat)?
+        var bestMatch: (amount: Decimal, priceEntryID: UUID, y: CGFloat)?
+        let horizontalTolerance: CGFloat = 0.02
 
         for label in labelCandidates {
-            let priceMatch = priceEntries
-                .filter { abs($0.boundingBox.midY - label.boundingBox.midY) < rowThreshold }
-                .sorted { abs($0.boundingBox.midY - label.boundingBox.midY) < abs($1.boundingBox.midY - label.boundingBox.midY) }
-                .first
+            let candidates = priceEntries.filter { entry in
+                abs(entry.boundingBox.midY - label.boundingBox.midY) < rowThreshold &&
+                entry.boundingBox.minX > label.boundingBox.midX - horizontalTolerance
+            }
 
-            guard let priceEntry = priceMatch,
-                  let amount = sanitizeCurrency(from: priceEntry.text, using: priceRegex) else { continue }
+            guard let priceEntry = candidates.min(by: { lhs, rhs in
+                abs(lhs.boundingBox.midY - label.boundingBox.midY) < abs(rhs.boundingBox.midY - label.boundingBox.midY)
+            }) else { continue }
 
-            let candidate = (price: amount, priceEntryID: priceEntry.id, y: priceEntry.boundingBox.minY)
+            guard let amountText = sanitizeCurrency(from: priceEntry.text, using: priceRegex),
+                  let decimalAmount = decimal(from: amountText) else { continue }
+
+            let candidate = (amount: decimalAmount, priceEntryID: priceEntry.id, y: priceEntry.boundingBox.minY)
             if bestMatch == nil || candidate.y < bestMatch!.y {
                 bestMatch = candidate
             }
         }
 
-        return bestMatch.map { ($0.price, $0.priceEntryID) }
+        return bestMatch.map { ($0.amount, $0.priceEntryID) }
     }
 
     private static func fallbackTotal(from entries: [RecognizedEntry],
                                        excludingPriceIDs: Set<UUID>,
-                                       priceRegex: NSRegularExpression) -> String? {
+                                       priceRegex: NSRegularExpression) -> Decimal? {
         let priceEntries = entries
             .filter { !excludingPriceIDs.contains($0.id) && matchesCurrency($0.text, regex: priceRegex) }
-            .sorted { $0.boundingBox.minY < $1.boundingBox.minY } // nearer bottom first
+            .sorted { $0.boundingBox.minY < $1.boundingBox.minY }
 
         for entry in priceEntries {
-            if let amount = sanitizeCurrency(from: entry.text, using: priceRegex) {
-                return amount
+            if let amountText = sanitizeCurrency(from: entry.text, using: priceRegex),
+               let decimalAmount = decimal(from: amountText) {
+                return decimalAmount
             }
         }
         return nil
@@ -199,6 +255,18 @@ enum InvoiceOCRProcessor {
             return text[swiftRange].replacingOccurrences(of: " ", with: "")
         }
         return nil
+    }
+
+    private static func decimal(from currencyString: String) -> Decimal? {
+        let cleaned = currencyString
+            .replacingOccurrences(of: "$", with: "")
+            .replacingOccurrences(of: ",", with: "")
+        return Decimal(string: cleaned)
+    }
+
+    private static func matchesUnitPrice(_ text: String) -> Bool {
+        let range = NSRange(location: 0, length: text.utf16.count)
+        return unitPriceRegex.firstMatch(in: text.lowercased(), options: [], range: range) != nil
     }
 
     private static func firstMatch(in line: String, pattern: String) -> String? {
@@ -238,6 +306,11 @@ enum InvoiceOCRProcessor {
 
     private static let currencyRegex: NSRegularExpression = {
         let pattern = #"\$?\s*(\d{1,3}(,\d{3})*|\d+)(\.\d{2})?"#
+        return try! NSRegularExpression(pattern: pattern, options: [])
+    }()
+
+    private static let unitPriceRegex: NSRegularExpression = {
+        let pattern = #"\b\d+(?:\.\d+)?\s*/\s*(ea|kg|g|lb|ml|l|pack|pc)s?\b"#
         return try! NSRegularExpression(pattern: pattern, options: [])
     }()
 #else

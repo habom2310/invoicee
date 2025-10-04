@@ -100,6 +100,12 @@ struct CapturedInvoiceRow: View {
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
+
+                if invoice.gst > 0 {
+                    Text("GST " + invoice.displayGST)
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
+                }
             }
         }
         .padding(.vertical, 4)
@@ -134,10 +140,10 @@ struct InvoiceDetailView: View {
                     TextField("Supplier", text: $draft.supplier)
 
                     fieldLabel("Total Amount")
-                    TextField("Total amount", text: $draft.total.enforcingNumeric(allowDecimal: true))
-#if os(iOS)
-                        .keyboardType(.decimalPad)
-#endif
+                    currencyInputField(placeholder: "Total amount", value: totalAmountBinding)
+
+                    fieldLabel("GST Amount")
+                    currencyInputField(placeholder: "GST amount", value: gstAmountBinding)
 
                     fieldLabel("Category")
                     Menu {
@@ -245,6 +251,22 @@ struct InvoiceDetailView: View {
             .foregroundStyle(.secondary)
     }
 
+    private func currencyInputField(placeholder: String, value: Binding<String>) -> some View {
+        HStack(spacing: 4) {
+            Text("$")
+                .foregroundStyle(.secondary)
+            TextField(placeholder, text: value.enforcingNumeric(allowDecimal: true))
+#if os(iOS)
+                .keyboardType(.decimalPad)
+                .textContentType(.oneTimeCode)
+#endif
+        }
+        .padding(.vertical, 6)
+        .padding(.horizontal, 10)
+        .background(Color.secondary.opacity(0.08))
+        .clipShape(RoundedRectangle(cornerRadius: 8))
+    }
+
     private func addItem() {
         var updatedItems = draftItemsBinding.wrappedValue
         updatedItems.append(ManualInvoiceItem())
@@ -279,5 +301,25 @@ struct InvoiceDetailView: View {
         categoryStore.addCategory(trimmed)
         draft.category = trimmed
         newCategoryName = ""
+    }
+
+    private var totalAmountBinding: Binding<String> {
+        Binding(
+            get: { draft.total.plainString },
+            set: { newValue in
+                let filtered = newValue.filteredNumeric(allowDecimal: true)
+                draft.total = Decimal(string: filtered) ?? 0
+            }
+        )
+    }
+
+    private var gstAmountBinding: Binding<String> {
+        Binding(
+            get: { draft.gst.plainString },
+            set: { newValue in
+                let filtered = newValue.filteredNumeric(allowDecimal: true)
+                draft.gst = Decimal(string: filtered) ?? 0
+            }
+        )
     }
 }

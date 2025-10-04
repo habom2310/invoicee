@@ -24,12 +24,26 @@ struct ManualInvoiceFormView: View {
                         .autocorrectionDisabled()
 #endif
 
-                    TextField("Total amount", text: $data.totalAmount.enforcingNumeric(allowDecimal: true))
-#if os(iOS)
-                        .keyboardType(.decimalPad)
-#endif
+                    fieldLabel("Total Amount")
+                    currencyTextField(placeholder: "Total amount", value: Binding(
+                        get: { data.totalAmount?.plainString ?? "" },
+                        set: { newValue in
+                            let filtered = newValue.filteredNumeric(allowDecimal: true)
+                            data.totalAmount = filtered.isEmpty ? nil : Decimal(string: filtered)
+                        }
+                    ))
+
+                    fieldLabel("GST Amount")
+                    currencyTextField(placeholder: "GST amount", value: Binding(
+                        get: { data.gstAmount?.plainString ?? "" },
+                        set: { newValue in
+                            let filtered = newValue.filteredNumeric(allowDecimal: true)
+                            data.gstAmount = filtered.isEmpty ? nil : Decimal(string: filtered)
+                        }
+                    ))
 
                     VStack(alignment: .leading, spacing: 8) {
+                        fieldLabel("Category")
                         Menu {
                             Button("None") { data.selectedCategory = nil }
                             ForEach(categoryStore.categories, id: \.self) { category in
@@ -49,6 +63,7 @@ struct ManualInvoiceFormView: View {
                             .clipShape(RoundedRectangle(cornerRadius: 10))
                         }
 
+                        fieldLabel("Add Category")
                         HStack {
                             TextField("Add new category", text: $data.newCategory)
                                 .textInputAutocapitalization(.words)
@@ -116,6 +131,29 @@ struct ManualInvoiceFormView: View {
         updatedItems.removeAll { $0.id == id }
         itemsBinding.wrappedValue = updatedItems
     }
+
+    private func currencyTextField(placeholder: String, value: Binding<String>) -> some View {
+        HStack(spacing: 4) {
+            Text("$")
+                .foregroundStyle(.secondary)
+            TextField(placeholder, text: value.enforcingNumeric(allowDecimal: true))
+#if os(iOS)
+                .keyboardType(.decimalPad)
+                .textContentType(.oneTimeCode)
+#endif
+        }
+        .padding(.vertical, 6)
+        .padding(.horizontal, 10)
+        .background(Color.secondary.opacity(0.08))
+        .clipShape(RoundedRectangle(cornerRadius: 8))
+    }
+
+    private func fieldLabel(_ text: String) -> some View {
+        Text(text.uppercased())
+            .font(.caption)
+            .fontWeight(.semibold)
+            .foregroundStyle(.secondary)
+    }
 }
 
 struct InvoiceItemFields: View {
@@ -133,23 +171,11 @@ struct InvoiceItemFields: View {
 #if os(iOS)
                     .keyboardType(.numberPad)
 #endif
-                TextField("Unit price", text: $item.unitPrice.enforcingNumeric(allowDecimal: true))
-#if os(iOS)
-                    .keyboardType(.decimalPad)
-#endif
+                TextField("Unit price", text: $item.unitPrice)
             }
 
-            fieldLabel("Totals")
-            HStack {
-                TextField("Total amount", text: $item.totalAmount.enforcingNumeric(allowDecimal: true))
-#if os(iOS)
-                    .keyboardType(.decimalPad)
-#endif
-                TextField("GST", text: $item.gst.enforcingNumeric(allowDecimal: true))
-#if os(iOS)
-                    .keyboardType(.decimalPad)
-#endif
-            }
+            fieldLabel("Total Amount")
+            currencyTextField(placeholder: "Total amount", value: $item.totalAmount)
 
             if let onDelete {
                 HStack {
@@ -162,6 +188,22 @@ struct InvoiceItemFields: View {
                 }
             }
         }
+    }
+
+    private func currencyTextField(placeholder: String, value: Binding<String>) -> some View {
+        HStack(spacing: 4) {
+            Text("$")
+                .foregroundStyle(.secondary)
+            TextField(placeholder, text: value.enforcingNumeric(allowDecimal: true))
+#if os(iOS)
+                .keyboardType(.decimalPad)
+                .textContentType(.oneTimeCode)
+#endif
+        }
+        .padding(.vertical, 6)
+        .padding(.horizontal, 10)
+        .background(Color.secondary.opacity(0.08))
+        .clipShape(RoundedRectangle(cornerRadius: 8))
     }
 
     private func fieldLabel(_ text: String) -> some View {

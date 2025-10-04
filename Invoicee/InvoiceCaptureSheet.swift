@@ -216,9 +216,13 @@ struct InvoiceCaptureSheet: View {
     }
 
     private func finalizeSubmission(from data: ManualInvoiceData, method: CapturedInvoice.Method, imageData: Data?) {
+        guard let totalDecimal = data.totalAmount else { return }
+        let gstDecimal = data.gstAmount ?? 0
+
         let invoice = CapturedInvoice(
             supplier: data.supplier.trimmed,
-            total: data.totalAmount.trimmed,
+            total: totalDecimal,
+            gst: gstDecimal,
             date: data.date,
             method: method,
             category: data.selectedCategory,
