@@ -1,9 +1,11 @@
 import SwiftUI
+import Combine
 
 struct ManualInvoiceFormView: View {
     @Binding var data: ManualInvoiceData
     @Binding var validationMessage: String?
     @ObservedObject var categoryStore: InvoiceCategoryStore
+    @State private var itemsExpanded: Bool = false
 
     private var itemsBinding: Binding<[ManualInvoiceItem]> { $data.items }
     private var itemsValue: [ManualInvoiceItem] { itemsBinding.wrappedValue }
@@ -23,31 +25,89 @@ struct ManualInvoiceFormView: View {
                         .textInputAutocapitalization(.words)
                         .autocorrectionDisabled()
 #endif
+                        .invoiceInputStyle()
 
-                    fieldLabel("Total Amount")
-                    currencyTextField(placeholder: "Total amount", value: Binding(
+                    InvoiceFieldLabel("Total Amount")
+                    InvoiceCurrencyField("Total amount", text: Binding(
                         get: { data.totalAmount?.plainString ?? "" },
                         set: { newValue in
                             let filtered = newValue.filteredNumeric(allowDecimal: true)
-                            data.totalAmount = filtered.isEmpty ? nil : Decimal(string: filtered)
+                            if filtered.isEmpty {
+                                data.totalAmount = nil
+                                if !data.hasCustomOurAmount {
+                                    data.ourAmount = nil
+                                }
+                            } else if let decimal = Decimal(string: filtered) {
+                                data.totalAmount = decimal
+                                if !data.hasCustomOurAmount {
+                                    data.ourAmount = nil
+                                }
+                            }
+
+                            data.gstAmount = GSTValidator.sanitizedAmount(for: data.gstAmount, total: data.totalAmount)
                         }
                     ))
 
-                    fieldLabel("GST Amount")
-                    currencyTextField(placeholder: "GST amount", value: Binding(
+                    InvoiceFieldLabel("Our Amount")
+                    InvoiceCurrencyField("Our amount", text: Binding(
+                        get: {
+                            if data.hasCustomOurAmount, let ourAmount = data.ourAmount {
+                                return ourAmount.plainString
+                            }
+                            return data.totalAmount?.plainString ?? ""
+                        },
+                        set: { newValue in
+                            let filtered = newValue.filteredNumeric(allowDecimal: true)
+                            if filtered.isEmpty {
+                                data.hasCustomOurAmount = false
+                                data.ourAmount = nil
+                            } else {
+                                if let decimal = Decimal(string: filtered) {
+                                    if let total = data.totalAmount, decimal == total {
+                                        data.hasCustomOurAmount = false
+                                        data.ourAmount = nil
+                                    } else {
+                                        data.hasCustomOurAmount = true
+                                        data.ourAmount = decimal
+                                    }
+                                } else {
+                                    data.hasCustomOurAmount = true
+                                    data.ourAmount = nil
+                                }
+                            }
+                        }
+                    ))
+
+                    InvoiceFieldLabel("GST Amount")
+                    InvoiceCurrencyField("GST amount", text: Binding(
                         get: { data.gstAmount?.plainString ?? "" },
                         set: { newValue in
                             let filtered = newValue.filteredNumeric(allowDecimal: true)
-                            data.gstAmount = filtered.isEmpty ? nil : Decimal(string: filtered)
+                            guard !filtered.isEmpty else {
+                                data.gstAmount = nil
+                                return
+                            }
+
+                            if let decimal = Decimal(string: filtered) {
+                                data.gstAmount = GSTValidator.sanitizedAmount(for: decimal, total: data.totalAmount)
+                            } else {
+                                data.gstAmount = nil
+                            }
                         }
                     ))
 
                     VStack(alignment: .leading, spacing: 8) {
-                        fieldLabel("Category")
+                        InvoiceFieldLabel("Category")
                         Menu {
-                            Button("None") { data.selectedCategory = nil }
+                            Button("None") {
+                                data.selectedCategory = nil
+                                data.autoFilledSupplierKey = nil
+                            }
                             ForEach(categoryStore.categories, id: \.self) { category in
-                                Button(category) { data.selectedCategory = category }
+                                Button(category) {
+                                    data.selectedCategory = category
+                                    data.autoFilledSupplierKey = nil
+                                }
                             }
                         } label: {
                             HStack {
@@ -63,7 +123,7 @@ struct ManualInvoiceFormView: View {
                             .clipShape(RoundedRectangle(cornerRadius: 10))
                         }
 
-                        fieldLabel("Add Category")
+                        InvoiceFieldLabel("Add Category")
                         HStack {
                             TextField("Add new category", text: $data.newCategory)
                                 .textInputAutocapitalization(.words)
@@ -79,30 +139,55 @@ struct ManualInvoiceFormView: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
 
-            GroupBox("Items") {
-                VStack(alignment: .leading, spacing: 12) {
-                    if itemsValue.isEmpty {
-                        Text("No items added yet.")
-                            .foregroundStyle(.secondary)
-                    }
-
-                    ForEach(itemsBinding) { $item in
-                        InvoiceItemFields(item: $item) {
-                            removeItem(withID: item.id)
+            GroupBox {
+                DisclosureGroup(isExpanded: $itemsExpanded) {
+                    VStack(alignment: .leading, spacing: 12) {
+                        if itemsValue.isEmpty {
+                            Text("No items added yet.")
+                                .foregroundStyle(.secondary)
                         }
 
-                        if item.id != itemsValue.last?.id {
-                            Divider()
+                        ForEach(itemsBinding) { $item in
+                            InvoiceItemFields(item: $item) {
+                                removeItem(withID: item.id)
+                            }
+
+                            if item.id != itemsValue.last?.id {
+                                Divider()
+                            }
+                        }
+
+                        Button {
+                            addItem()
+                        } label: {
+                            Label("Add Item", systemImage: "plus.circle")
                         }
                     }
-
-                    Button {
-                        addItem()
-                    } label: {
-                        Label("Add Item", systemImage: "plus.circle")
+                } label: {
+                    HStack {
+                        Text("Items [\(itemsValue.count)]")
+                            .font(.headline)
+                        Spacer()
                     }
                 }
             }
+        }
+        .onAppear {
+            applyRememberedCategory(resetIfMissing: false)
+        }
+        .onChange(of: data.supplier) { _ in
+            applyRememberedCategory(resetIfMissing: true)
+        }
+        .onReceive(categoryStore.$supplierCategories) { _ in
+            applyRememberedCategory(resetIfMissing: false)
+        }
+        .onChange(of: data.items.count) { _ in
+            if data.items.isEmpty {
+                itemsExpanded = false
+            }
+        }
+        .onAppear {
+            itemsExpanded = false
         }
     }
 
@@ -117,6 +202,7 @@ struct ManualInvoiceFormView: View {
         guard !trimmed.isEmpty else { return }
         categoryStore.addCategory(trimmed)
         data.selectedCategory = trimmed
+        data.autoFilledSupplierKey = nil
         data.newCategory = ""
     }
 
@@ -132,28 +218,33 @@ struct ManualInvoiceFormView: View {
         itemsBinding.wrappedValue = updatedItems
     }
 
-    private func currencyTextField(placeholder: String, value: Binding<String>) -> some View {
-        HStack(spacing: 4) {
-            Text("$")
-                .foregroundStyle(.secondary)
-            TextField(placeholder, text: value.enforcingNumeric(allowDecimal: true))
-#if os(iOS)
-                .keyboardType(.decimalPad)
-                .textContentType(.oneTimeCode)
-#endif
+    private func applyRememberedCategory(resetIfMissing: Bool) {
+        let trimmedSupplier = data.supplier.trimmed
+
+        guard !trimmedSupplier.isEmpty else {
+            if resetIfMissing {
+                data.selectedCategory = nil
+                data.autoFilledSupplierKey = nil
+            }
+            return
         }
-        .padding(.vertical, 6)
-        .padding(.horizontal, 10)
-        .background(Color.secondary.opacity(0.08))
-        .clipShape(RoundedRectangle(cornerRadius: 8))
+
+        if let rememberedCategory = categoryStore.category(for: trimmedSupplier) {
+            let normalizedKey = trimmedSupplier.lowercased()
+            if data.autoFilledSupplierKey == nil, data.selectedCategory != nil {
+                return
+            }
+
+            if data.autoFilledSupplierKey != normalizedKey || data.selectedCategory != rememberedCategory {
+                data.selectedCategory = rememberedCategory
+                data.autoFilledSupplierKey = normalizedKey
+            }
+        } else if resetIfMissing {
+            data.selectedCategory = nil
+            data.autoFilledSupplierKey = nil
+        }
     }
 
-    private func fieldLabel(_ text: String) -> some View {
-        Text(text.uppercased())
-            .font(.caption)
-            .fontWeight(.semibold)
-            .foregroundStyle(.secondary)
-    }
 }
 
 struct InvoiceItemFields: View {
@@ -162,20 +253,24 @@ struct InvoiceItemFields: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            fieldLabel("Item Name")
+            InvoiceFieldLabel("Item Name")
             TextField("Item name", text: $item.name)
 
-            fieldLabel("Quantity & Unit Price")
+            InvoiceFieldLabel("Quantity & Unit Price")
             HStack {
                 TextField("Quantity", text: $item.quantity.enforcingNumeric(allowDecimal: false))
 #if os(iOS)
                     .keyboardType(.numberPad)
 #endif
-                TextField("Unit price", text: $item.unitPrice)
+                TextField("Unit price", text: $item.unitPrice.enforcingNumeric(allowDecimal: true))
+#if os(iOS)
+                    .keyboardType(.decimalPad)
+                    .textContentType(.oneTimeCode)
+#endif
             }
 
-            fieldLabel("Total Amount")
-            currencyTextField(placeholder: "Total amount", value: $item.totalAmount)
+            InvoiceFieldLabel("Item Amount")
+            InvoiceCurrencyField("Item amount", text: $item.totalAmount)
 
             if let onDelete {
                 HStack {
@@ -190,26 +285,4 @@ struct InvoiceItemFields: View {
         }
     }
 
-    private func currencyTextField(placeholder: String, value: Binding<String>) -> some View {
-        HStack(spacing: 4) {
-            Text("$")
-                .foregroundStyle(.secondary)
-            TextField(placeholder, text: value.enforcingNumeric(allowDecimal: true))
-#if os(iOS)
-                .keyboardType(.decimalPad)
-                .textContentType(.oneTimeCode)
-#endif
-        }
-        .padding(.vertical, 6)
-        .padding(.horizontal, 10)
-        .background(Color.secondary.opacity(0.08))
-        .clipShape(RoundedRectangle(cornerRadius: 8))
-    }
-
-    private func fieldLabel(_ text: String) -> some View {
-        Text(text.uppercased())
-            .font(.caption)
-            .fontWeight(.semibold)
-            .foregroundStyle(.secondary)
-    }
 }

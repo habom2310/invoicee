@@ -6,27 +6,21 @@
 //
 
 import SwiftUI
-import SwiftData
+#if canImport(FirebaseCore)
+import FirebaseCore
+#endif
 
 @main
 struct InvoiceeApp: App {
-    var sharedModelContainer: ModelContainer = {
-        let schema = Schema([
-            Item.self,
-        ])
-        let modelConfiguration = ModelConfiguration(schema: schema, isStoredInMemoryOnly: false)
-
-        do {
-            return try ModelContainer(for: schema, configurations: [modelConfiguration])
-        } catch {
-            fatalError("Could not create ModelContainer: \(error)")
-        }
-    }()
+    init() {
+#if canImport(FirebaseCore)
+        FirebaseApp.configure()
+#endif
+    }
 
     var body: some Scene {
         WindowGroup {
             ContentView()
         }
-        .modelContainer(sharedModelContainer)
     }
 }

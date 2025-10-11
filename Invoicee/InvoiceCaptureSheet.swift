@@ -11,9 +11,11 @@ struct InvoiceCaptureSheet: View {
     var onSubmit: (CapturedInvoice) -> Void
 
     init(categoryStore: InvoiceCategoryStore = .shared,
+         knownSuppliers: [String] = [],
          isPresented: Binding<Bool>,
          onSubmit: @escaping (CapturedInvoice) -> Void) {
         self._categoryStore = ObservedObject(wrappedValue: categoryStore)
+        self._knownSuppliers = State(initialValue: InvoiceCaptureSheet.normalizeSuppliers(knownSuppliers))
         self._isPresented = isPresented
         self.onSubmit = onSubmit
     }
@@ -26,13 +28,14 @@ struct InvoiceCaptureSheet: View {
     @State private var ocrData = ManualInvoiceData()
     @State private var hasOCRResult = false
     @State private var ocrValidationMessage: String?
-    @State private var ocrRawLines: [String] = []
     @State private var ocrErrorMessage: String?
+    @State private var knownSuppliers: [String]
 
 #if canImport(VisionKit)
     @State private var scannedImage: UIImage?
     @State private var scannedThumbnail: Image?
     @State private var isPresentingDocumentScanner = false
+    @State private var isPresentingPhotoPicker = false
 #endif
 
     var body: some View {
@@ -84,6 +87,11 @@ struct InvoiceCaptureSheet: View {
                 handleScanResult(result)
             }
         }
+        .sheet(isPresented: $isPresentingPhotoPicker) {
+            PhotoLibraryPicker { result in
+                handlePhotoLibraryResult(result)
+            }
+        }
 #endif
     }
 
@@ -92,7 +100,7 @@ struct InvoiceCaptureSheet: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 20) {
                 if !hasOCRResult {
-                    Text("Tap the camera icon to scan an invoice. Review and edit the detected details before saving.")
+                    Text("Capture an invoice with the camera or pick an existing photo. Review and edit the detected details before saving.")
                         .foregroundStyle(.secondary)
                 }
 
@@ -119,6 +127,18 @@ struct InvoiceCaptureSheet: View {
                     .buttonBorderShape(.circle)
 #endif
                     .accessibilityLabel(hasOCRResult ? "Rescan invoice" : "Scan invoice")
+
+                    Button {
+                        isPresentingPhotoPicker = true
+                    } label: {
+                        Image(systemName: "photo.on.rectangle")
+                            .font(.system(size: 28, weight: .medium))
+                    }
+                    .buttonStyle(.bordered)
+#if os(iOS)
+                    .buttonBorderShape(.circle)
+#endif
+                    .accessibilityLabel("Select invoice from photos")
 
                     if hasOCRResult {
                         Button {
@@ -217,19 +237,27 @@ struct InvoiceCaptureSheet: View {
 
     private func finalizeSubmission(from data: ManualInvoiceData, method: CapturedInvoice.Method, imageData: Data?) {
         guard let totalDecimal = data.totalAmount else { return }
-        let gstDecimal = data.gstAmount ?? 0
+        let sanitizedGST = GSTValidator.sanitizedAmount(for: data.gstAmount, total: data.totalAmount)
+        let gstDecimal = sanitizedGST ?? 0
+        let ourAmount = data.hasCustomOurAmount ? (data.ourAmount ?? totalDecimal) : totalDecimal
 
+        let now = Date()
         let invoice = CapturedInvoice(
             supplier: data.supplier.trimmed,
             total: totalDecimal,
+            ourAmount: ourAmount,
             gst: gstDecimal,
             date: data.date,
             method: method,
             category: data.selectedCategory,
             items: data.items,
-            imageData: imageData
+            imageData: imageData,
+            remoteImageFileName: nil,
+            lastEdited: now
         )
 
+        categoryStore.rememberCategory(invoice.category, for: invoice.supplier)
+        appendKnownSupplier(invoice.supplier)
         onSubmit(invoice)
         resetCameraState()
         manualData = ManualInvoiceData()
@@ -246,12 +274,31 @@ struct InvoiceCaptureSheet: View {
         hasOCRResult = false
         ocrData = ManualInvoiceData()
         ocrValidationMessage = nil
-        ocrRawLines = []
         ocrErrorMessage = nil
 #if canImport(VisionKit)
         scannedImage = nil
         scannedThumbnail = nil
 #endif
+    }
+
+    private static func normalizeSuppliers(_ suppliers: [String]) -> [String] {
+        var unique: [String] = []
+        for supplier in suppliers {
+            let trimmed = supplier.trimmed
+            guard !trimmed.isEmpty else { continue }
+            if !unique.contains(where: { $0.caseInsensitiveCompare(trimmed) == .orderedSame }) {
+                unique.append(trimmed)
+            }
+        }
+        return unique
+    }
+
+    private func appendKnownSupplier(_ supplier: String) {
+        let trimmed = supplier.trimmed
+        guard !trimmed.isEmpty else { return }
+        if !knownSuppliers.contains(where: { $0.caseInsensitiveCompare(trimmed) == .orderedSame }) {
+            knownSuppliers.append(trimmed)
+        }
     }
 
 #if canImport(VisionKit)
@@ -274,18 +321,31 @@ struct InvoiceCaptureSheet: View {
         }
     }
 
+    private func handlePhotoLibraryResult(_ result: Result<UIImage, Error>) {
+        switch result {
+        case .success(let image):
+            scannedImage = image
+            scannedThumbnail = Image(uiImage: image)
+            extractInvoiceData(from: image)
+        case .failure(let error):
+            if let pickerError = error as? PhotoLibraryPicker.PickerError, pickerError == .cancelled {
+                return
+            }
+            ocrErrorMessage = error.localizedDescription
+        }
+    }
+
     private func extractInvoiceData(from image: UIImage) {
         isProcessing = true
         ocrErrorMessage = nil
-        ocrRawLines = []
         hasOCRResult = false
 
         Task {
             do {
-                let result = try await InvoiceOCRProcessor.process(image: image)
+                let supplierSnapshot = knownSuppliers
+                let result = try await InvoiceOCRProcessor.process(image: image, knownSuppliers: supplierSnapshot)
                 await MainActor.run {
                     ocrData = result.data
-                    ocrRawLines = result.rawLines
                     hasOCRResult = true
                     isProcessing = false
                 }
@@ -317,3 +377,64 @@ extension InvoiceCaptureSheet {
         }
     }
 }
+
+#if canImport(UIKit)
+private struct PhotoLibraryPicker: UIViewControllerRepresentable {
+    typealias UIViewControllerType = UIImagePickerController
+    let onComplete: (Result<UIImage, Error>) -> Void
+
+    enum PickerError: LocalizedError, Equatable {
+        case cancelled
+        case missingImage
+
+        var errorDescription: String? {
+            switch self {
+            case .cancelled:
+                return nil
+            case .missingImage:
+                return "Unable to load selected image."
+            }
+        }
+    }
+
+    final class Coordinator: NSObject, UINavigationControllerDelegate, UIImagePickerControllerDelegate {
+        let parent: PhotoLibraryPicker
+
+        init(parent: PhotoLibraryPicker) {
+            self.parent = parent
+        }
+
+        func imagePickerControllerDidCancel(_ picker: UIImagePickerController) {
+            parent.onComplete(.failure(PickerError.cancelled))
+            picker.dismiss(animated: true)
+        }
+
+        func imagePickerController(_ picker: UIImagePickerController, didFinishPickingMediaWithInfo info: [UIImagePickerController.InfoKey : Any]) {
+            defer { picker.dismiss(animated: true) }
+
+            let edited = info[.editedImage] as? UIImage
+            let original = info[.originalImage] as? UIImage
+
+            if let image = edited ?? original {
+                parent.onComplete(.success(image))
+            } else {
+                parent.onComplete(.failure(PickerError.missingImage))
+            }
+        }
+    }
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(parent: self)
+    }
+
+    func makeUIViewController(context: Context) -> UIImagePickerController {
+        let picker = UIImagePickerController()
+        picker.sourceType = .photoLibrary
+        picker.allowsEditing = false
+        picker.delegate = context.coordinator
+        return picker
+    }
+
+    func updateUIViewController(_ uiViewController: UIImagePickerController, context: Context) {}
+}
+#endif

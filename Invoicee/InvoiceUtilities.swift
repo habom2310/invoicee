@@ -1,4 +1,5 @@
 import SwiftUI
+import Combine
 import Foundation
 
 extension Color {
@@ -70,11 +71,50 @@ extension Decimal {
     }
 }
 
+enum GSTValidator {
+    private static let maximumPercentage = Decimal(string: "0.10")!
+
+    static func sanitizedAmount(for gst: Decimal?, total: Decimal?) -> Decimal? {
+        guard let gst else { return nil }
+        guard let total, total > 0 else { return gst }
+
+        let maximumAllowed = total * maximumPercentage
+        return gst >= maximumAllowed ? nil : gst
+    }
+}
+
 extension Date {
     func formattedInvoiceDate() -> String {
         let formatter = DateFormatter()
         formatter.locale = Locale(identifier: "en_US_POSIX")
         formatter.dateFormat = "dd-MM-yyyy"
         return formatter.string(from: self)
+    }
+}
+
+@MainActor
+final class InvoiceArchive: ObservableObject {
+    static let shared = InvoiceArchive()
+
+    @Published private(set) var invoices: [CapturedInvoice] = []
+    @Published private(set) var syncedInvoiceIDs: Set<UUID> = []
+
+    private init() {}
+
+    func update(with invoices: [CapturedInvoice]) {
+        self.invoices = invoices
+        GoogleDriveConnector.shared.enqueueAutoSync(with: invoices)
+
+        Task {
+            var synced: Set<UUID> = []
+            for invoice in invoices {
+                if await InvoiceSyncTracker.shared.isUpToDate(invoice) {
+                    synced.insert(invoice.id)
+                }
+            }
+            await MainActor.run {
+                self.syncedInvoiceIDs = synced
+            }
+        }
     }
 }

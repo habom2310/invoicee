@@ -19,6 +19,11 @@ struct ContentView: View {
                 .tabItem {
                     Label("Expense", systemImage: "chart.pie")
                 }
+
+            ProfileTabView()
+                .tabItem {
+                    Label("Profile", systemImage: "person.crop.circle")
+                }
         }
     }
 }

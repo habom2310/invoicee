@@ -1,7 +1,7 @@
 import Foundation
 
-struct CapturedInvoice: Identifiable {
-    enum Method {
+struct CapturedInvoice: Identifiable, Encodable, Equatable {
+    enum Method: String, Encodable {
         case camera
         case manual
 
@@ -23,12 +23,15 @@ struct CapturedInvoice: Identifiable {
     var id = UUID()
     var supplier: String
     var total: Decimal
+    var ourAmount: Decimal
     var gst: Decimal
     var date: Date
     let method: Method
     var category: String?
     var items: [ManualInvoiceItem]
     var imageData: Data?
+    var remoteImageFileName: String?
+    var lastEdited: Date = .now
 
     var formattedDate: String {
         date.formattedInvoiceDate()
@@ -41,27 +44,32 @@ struct CapturedInvoice: Identifiable {
     var displayGST: String {
         gst.formattedCurrency()
     }
+
+    var displayOurAmount: String {
+        ourAmount.formattedCurrency()
+    }
 }
 
 struct ManualInvoiceData {
     var supplier: String = ""
     var totalAmount: Decimal?
+    var ourAmount: Decimal?
     var gstAmount: Decimal?
+    var hasCustomOurAmount: Bool = false
     var selectedCategory: String?
     var newCategory: String = ""
     var date: Date = .now
     var items: [ManualInvoiceItem] = []
+    /// Tracks whether the currently selected category was auto-filled for a supplier.
+    var autoFilledSupplierKey: String? = nil
 
     var isValid: Bool {
         !supplier.trimmed.isEmpty && totalAmount != nil
     }
 
-    mutating func addItem() {
-        items.append(ManualInvoiceItem())
-    }
 }
 
-struct ManualInvoiceItem: Identifiable {
+struct ManualInvoiceItem: Identifiable, Encodable, Equatable {
     let id = UUID()
     var name: String = ""
     var quantity: String = ""

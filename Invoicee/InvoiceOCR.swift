@@ -39,7 +39,7 @@ struct InvoiceOCRResult {
 
 enum InvoiceOCRProcessor {
 #if canImport(Vision) && canImport(UIKit)
-    static func process(image: UIImage) async throws -> InvoiceOCRResult {
+    static func process(image: UIImage, knownSuppliers: [String] = []) async throws -> InvoiceOCRResult {
         guard let cgImage = image.cgImage else {
             throw InvoiceOCRError.invalidImage
         }
@@ -60,7 +60,14 @@ enum InvoiceOCRProcessor {
         let lines = entries.map { $0.text }
 
         var data = ManualInvoiceData()
-        data.supplier = lines.first ?? ""
+
+        if let matchedSupplier = matchSupplier(in: lines, knownSuppliers: knownSuppliers) {
+            data.supplier = matchedSupplier
+        }
+
+        if data.supplier.trimmed.isEmpty {
+            data.supplier = lines.first ?? ""
+        }
         if let detectedDate = findDate(in: entries) {
             data.date = detectedDate
         }
@@ -68,14 +75,18 @@ enum InvoiceOCRProcessor {
         let priceRegex = currencyRegex
         var usedPriceIDs = Set<UUID>()
 
-        if let total = findTotalAmount(in: entries, priceRegex: priceRegex) {
+        if data.totalAmount == nil,
+           let total = findTotalAmount(in: entries, priceRegex: priceRegex) {
             data.totalAmount = total.amount
+            data.ourAmount = total.amount
             usedPriceIDs.insert(total.priceEntryID)
         }
 
-        let itemExtraction = extractLineItems(from: entries, priceRegex: priceRegex, excludingPriceIDs: usedPriceIDs)
-        data.items = itemExtraction.items
-        usedPriceIDs.formUnion(itemExtraction.usedPriceIDs)
+        if data.items.isEmpty {
+            let itemExtraction = extractLineItems(from: entries, priceRegex: priceRegex, excludingPriceIDs: usedPriceIDs)
+            data.items = itemExtraction.items
+            usedPriceIDs.formUnion(itemExtraction.usedPriceIDs)
+        }
 
         if data.gstAmount == nil,
            let gst = findGSTAmount(in: entries, priceRegex: priceRegex, usedPriceIDs: usedPriceIDs) {
@@ -86,7 +97,18 @@ enum InvoiceOCRProcessor {
         if data.totalAmount == nil,
            let fallback = fallbackTotal(from: entries, excludingPriceIDs: usedPriceIDs, priceRegex: priceRegex) {
             data.totalAmount = fallback
+            if data.ourAmount == nil {
+                data.ourAmount = fallback
+            }
         }
+
+        if data.ourAmount == nil {
+            data.ourAmount = data.totalAmount
+        }
+
+        data.gstAmount = GSTValidator.sanitizedAmount(for: data.gstAmount, total: data.totalAmount)
+        data.items = filteredItems(data.items, total: data.totalAmount)
+        data.hasCustomOurAmount = false
 
         return InvoiceOCRResult(data: data, rawLines: lines)
     }
@@ -122,12 +144,14 @@ enum InvoiceOCRProcessor {
             entry.text.contains("$")
         }
 
+        let nameVerticalTolerance = rowThreshold * 2
+
         for priceEntry in priceEntries.sorted(by: { $0.boundingBox.midY > $1.boundingBox.midY }) {
             guard let amount = sanitizeCurrency(from: priceEntry.text, using: priceRegex) else { continue }
 
-            let sameRowEntries = entries.filter { abs($0.boundingBox.midY - priceEntry.boundingBox.midY) < rowThreshold }
+            let nearbyEntries = entries.filter { abs($0.boundingBox.midY - priceEntry.boundingBox.midY) < nameVerticalTolerance }
 
-            let candidateNames = sameRowEntries
+            let candidateNames = nearbyEntries
                 .filter { $0.boundingBox.midX < priceEntry.boundingBox.midX }
                 .filter { nameEntry in
                     let lower = nameEntry.text.lowercased()
@@ -147,7 +171,9 @@ enum InvoiceOCRProcessor {
 
             guard let nameEntry = candidateNames.first else { continue }
 
-            let unitPriceEntry = sameRowEntries.first { matchesUnitPrice($0.text) }
+            let unitPriceEntry = nearbyEntries
+                .filter { $0.boundingBox.midX >= nameEntry.boundingBox.minX }
+                .first { matchesUnitPrice($0.text) }
 
             var item = ManualInvoiceItem()
             item.name = nameEntry.text
@@ -280,28 +306,34 @@ enum InvoiceOCRProcessor {
     }
 
     private static func parseDate(from string: String) -> Date? {
-        let formatter = DateFormatter()
-        formatter.locale = Locale(identifier: "en_US_POSIX")
+        let pattern = #"(\d{1,2})\D+(\d{1,2})\D+(\d{2,4})"#
+        guard let regex = try? NSRegularExpression(pattern: pattern, options: []) else { return nil }
+        let range = NSRange(location: 0, length: string.utf16.count)
 
-        let formats = [
-            "MM/dd/yyyy",
-            "MM/dd/yy",
-            "dd/MM/yyyy",
-            "dd/MM/yy",
-            "yyyy/MM/dd",
-            "yyyy-MM-dd",
-            "MM-dd-yyyy",
-            "dd-MM-yyyy"
-        ]
-
-        for format in formats {
-            formatter.dateFormat = format
-            if let date = formatter.date(from: string) {
-                return date
-            }
+        guard let match = regex.firstMatch(in: string, options: [], range: range), match.numberOfRanges == 4,
+              let dayRange = Range(match.range(at: 1), in: string),
+              let monthRange = Range(match.range(at: 2), in: string),
+              let yearRange = Range(match.range(at: 3), in: string) else {
+            return nil
         }
 
-        return nil
+        var day = String(string[dayRange])
+        var month = String(string[monthRange])
+        var year = String(string[yearRange])
+
+        if year.count == 2 {
+            year = "20" + year
+        }
+
+        day = day.count == 1 ? "0" + day : day
+        month = month.count == 1 ? "0" + month : month
+
+        let normalized = "\(day)-\(month)-\(year)"
+
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.dateFormat = "dd-MM-yyyy"
+        return formatter.date(from: normalized)
     }
 
     private static let currencyRegex: NSRegularExpression = {
@@ -314,10 +346,45 @@ enum InvoiceOCRProcessor {
         return try! NSRegularExpression(pattern: pattern, options: [])
     }()
 #else
-    static func process(image: Any) async throws -> InvoiceOCRResult {
+    static func process(image: Any, knownSuppliers: [String] = []) async throws -> InvoiceOCRResult {
         throw InvoiceOCRError.unavailable
     }
 #endif
+    private static func filteredItems(_ items: [ManualInvoiceItem], total: Decimal?) -> [ManualInvoiceItem] {
+        guard let total, items.count > 1 else { return items }
+
+        return items.filter { item in
+            guard let amount = decimal(from: item.totalAmount) else { return true }
+            return amount != total
+        }
+    }
+
+    private static func matchSupplier(in lines: [String], knownSuppliers: [String]) -> String? {
+        let normalizedSuppliers: [(original: String, normalized: String)] = knownSuppliers
+            .map { ($0, $0.trimmed.lowercased()) }
+            .filter { !$0.normalized.isEmpty }
+
+        guard !normalizedSuppliers.isEmpty else { return nil }
+
+        let normalizedLines = lines
+            .map { $0.trimmed.lowercased() }
+            .filter { !$0.isEmpty }
+
+        for line in normalizedLines {
+            if let exact = normalizedSuppliers.first(where: { line == $0.normalized }) {
+                return exact.original
+            }
+        }
+
+        let combinedText = normalizedLines.joined(separator: " ")
+        for supplier in normalizedSuppliers {
+            if combinedText.contains(supplier.normalized) {
+                return supplier.original
+            }
+        }
+
+        return nil
+    }
 }
 
 #if canImport(Vision)
