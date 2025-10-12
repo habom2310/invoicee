@@ -99,22 +99,88 @@ final class InvoiceArchive: ObservableObject {
     @Published private(set) var invoices: [CapturedInvoice] = []
     @Published private(set) var syncedInvoiceIDs: Set<UUID> = []
 
-    private init() {}
+    private let storageURL: URL
+
+    private init() {
+        storageURL = Self.makeStorageURL()
+        let persistedInvoices = Self.loadInvoices(from: storageURL)
+        invoices = persistedInvoices
+        scheduleAutoSync(for: persistedInvoices)
+        refreshSyncedState(for: persistedInvoices)
+    }
 
     func update(with invoices: [CapturedInvoice]) {
         self.invoices = invoices
-        GoogleDriveConnector.shared.enqueueAutoSync(with: invoices)
+        persist(invoices)
+        scheduleAutoSync(for: invoices)
+        refreshSyncedState(for: invoices)
+    }
 
+    func refreshSyncStatus() {
+        refreshSyncedState(for: invoices)
+    }
+
+    private func scheduleAutoSync(for invoices: [CapturedInvoice]) {
+        GoogleDriveConnector.shared.enqueueAutoSync(with: invoices)
+    }
+
+    private func refreshSyncedState(for invoices: [CapturedInvoice]) {
         Task {
             var synced: Set<UUID> = []
+            let tracker = InvoiceSyncTracker.shared
             for invoice in invoices {
-                if await InvoiceSyncTracker.shared.isUpToDate(invoice) {
+                if await tracker.isUpToDate(invoice) {
                     synced.insert(invoice.id)
                 }
             }
             await MainActor.run {
                 self.syncedInvoiceIDs = synced
             }
+        }
+    }
+
+    private func persist(_ invoices: [CapturedInvoice]) {
+        let url = storageURL
+        Task.detached(priority: .utility) {
+            let encoder = JSONEncoder()
+            encoder.dateEncodingStrategy = .iso8601
+            do {
+                let data = try encoder.encode(invoices)
+                try data.write(to: url, options: .atomic)
+            } catch {
+                print("InvoiceArchive persistence failed: \(error.localizedDescription)")
+            }
+        }
+    }
+
+    private static func makeStorageURL() -> URL {
+        let fileManager = FileManager.default
+        let baseURL = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first ?? fileManager.temporaryDirectory
+        let directory = baseURL.appendingPathComponent("Invoicee", isDirectory: true)
+
+        if !fileManager.fileExists(atPath: directory.path) {
+            do {
+                try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
+            } catch {
+                print("InvoiceArchive directory creation failed: \(error.localizedDescription)")
+                return fileManager.temporaryDirectory.appendingPathComponent("invoicee-invoices.json")
+            }
+        }
+
+        return directory.appendingPathComponent("invoices.json")
+    }
+
+    private static func loadInvoices(from url: URL) -> [CapturedInvoice] {
+        guard FileManager.default.fileExists(atPath: url.path) else { return [] }
+
+        do {
+            let data = try Data(contentsOf: url)
+            let decoder = JSONDecoder()
+            decoder.dateDecodingStrategy = .iso8601
+            return try decoder.decode([CapturedInvoice].self, from: data)
+        } catch {
+            print("InvoiceArchive load failed: \(error.localizedDescription)")
+            return []
         }
     }
 }

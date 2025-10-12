@@ -175,14 +175,14 @@ struct ManualInvoiceFormView: View {
         .onAppear {
             applyRememberedCategory(resetIfMissing: false)
         }
-        .onChange(of: data.supplier) { _ in
+        .onChange(of: data.supplier) { _, _ in
             applyRememberedCategory(resetIfMissing: true)
         }
         .onReceive(categoryStore.$supplierCategories) { _ in
             applyRememberedCategory(resetIfMissing: false)
         }
-        .onChange(of: data.items.count) { _ in
-            if data.items.isEmpty {
+        .onChange(of: data.items.count) { _, newCount in
+            if newCount == 0 {
                 itemsExpanded = false
             }
         }

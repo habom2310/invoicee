@@ -59,12 +59,13 @@ final class ExpenseAnalyticsViewModel: ObservableObject {
     @Published private(set) var previousMonthTotals: [CategoryTotal] = []
     @Published private(set) var previousMonthDescription: String? = nil
 
-    init(archive: InvoiceArchive = .shared,
+    init(archive: InvoiceArchive? = nil,
          calendar: Calendar = .current) {
-        self.archive = archive
+        let resolvedArchive = archive ?? InvoiceArchive.shared
+        self.archive = resolvedArchive
         self.calendar = calendar
 
-        archive.$invoices
+        resolvedArchive.$invoices
             .receive(on: RunLoop.main)
             .sink { [weak self] invoices in
                 guard let self else { return }
@@ -77,7 +78,7 @@ final class ExpenseAnalyticsViewModel: ObservableObject {
             }
             .store(in: &cancellables)
 
-        invoices = archive.invoices
+        invoices = resolvedArchive.invoices
         updatePreviousMonthData()
         syncSelectionWithBounds()
     }

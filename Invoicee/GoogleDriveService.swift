@@ -227,6 +227,9 @@ final class GoogleDriveConnector: NSObject, ObservableObject {
             await MainActor.run {
                 self.state = .linked
                 self.linkedFolderName = GoogleDriveTransferService.Constants.defaultFolderName
+                let archivedInvoices = InvoiceArchive.shared.invoices
+                InvoiceArchive.shared.refreshSyncStatus()
+                self.enqueueAutoSync(with: archivedInvoices)
             }
         } catch {
             await MainActor.run {
@@ -332,15 +335,33 @@ final class GoogleDriveConnector: NSObject, ObservableObject {
 
         autoSyncTask?.cancel()
         autoSyncTask = Task {
-            try? await Task.sleep(nanoseconds: 1_000_000_000)
-            guard !Task.isCancelled else { return }
+            let qualityRaw = UserDefaults.standard.string(forKey: GoogleDriveLinkViewModel.imageQualityPreferenceKey) ?? InvoiceImageQuality.large.rawValue
+            let quality = InvoiceImageQuality(rawValue: qualityRaw) ?? .large
 
-            do {
-                let qualityRaw = UserDefaults.standard.string(forKey: GoogleDriveLinkViewModel.imageQualityPreferenceKey) ?? InvoiceImageQuality.large.rawValue
-                let quality = InvoiceImageQuality(rawValue: qualityRaw) ?? .large
-                _ = try await self.syncInvoices(invoices, quality: quality)
-            } catch {
-                // Silently ignore auto-sync failures to avoid surfacing disruptive alerts
+            var delay: UInt64 = 1_000_000_000
+            let maximumDelay: UInt64 = 60_000_000_000
+
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: delay)
+                guard !Task.isCancelled else { return }
+                guard self.state == .linked else { return }
+
+                do {
+                    _ = try await self.syncInvoices(invoices, quality: quality)
+                    await MainActor.run {
+                        InvoiceArchive.shared.refreshSyncStatus()
+                    }
+                    return
+                } catch {
+                    if let syncError = error as? SyncError {
+                        switch syncError {
+                        case .missingUserIdentity:
+                            return
+                        }
+                    }
+
+                    delay = min(delay * 2, maximumDelay)
+                }
             }
         }
     }
@@ -432,7 +453,13 @@ final class GoogleDriveLinkViewModel: ObservableObject {
                 let syncedCount = try await connector.syncInvoices(invoices, quality: quality)
                 self.isSyncing = false
                 self.errorMessage = nil
-                self.syncStatusMessage = "Synced to Google Drive and Firestore."
+                if syncedCount == 0 {
+                    self.syncStatusMessage = "All invoices already synced."
+                } else if syncedCount == 1 {
+                    self.syncStatusMessage = "Synced 1 invoice to Google Drive and Firestore."
+                } else {
+                    self.syncStatusMessage = "Synced \(syncedCount) invoices to Google Drive and Firestore."
+                }
             } catch {
                 self.isSyncing = false
                 self.syncStatusMessage = nil
@@ -1207,12 +1234,14 @@ actor InvoiceSyncTracker {
     }
 
     func highestIncrementLookup() -> [String: Int] {
-        records.values.reduce(into: [:]) { partialResult, record in
+        var lookup: [String: Int] = [:]
+        for record in records.values {
             guard let path = record.imagePath,
-                  let parsed = DriveUploadMetadata.parseFileName(from: path) else { return }
-            let current = partialResult[parsed.baseName] ?? 0
-            partialResult[parsed.baseName] = max(current, parsed.increment)
+                  let parsed = parseImagePath(path) else { continue }
+            let current = lookup[parsed.baseName] ?? 0
+            lookup[parsed.baseName] = max(current, parsed.increment)
         }
+        return lookup
     }
 
     func reset() {
@@ -1227,5 +1256,38 @@ actor InvoiceSyncTracker {
         } else {
             UserDefaults.standard.removeObject(forKey: storageKey)
         }
+    }
+
+    private func parseImagePath(_ path: String) -> DriveUploadMetadata.ParsedFileName? {
+        let fileNameWithExtension = path.split(separator: "/").last.map(String.init) ?? path
+        let fileName: String
+        if let dotIndex = fileNameWithExtension.lastIndex(of: ".") {
+            fileName = String(fileNameWithExtension[..<dotIndex])
+        } else {
+            fileName = fileNameWithExtension
+        }
+
+        let components = fileName.split(separator: "_")
+        guard components.count >= 4 else { return nil }
+
+        var imageNumber: Int? = nil
+        var incrementComponentIndex = components.count - 1
+        let lastComponent = components[incrementComponentIndex]
+
+        if lastComponent.hasPrefix("image") {
+            let suffix = lastComponent.dropFirst("image".count)
+            guard let value = Int(suffix) else { return nil }
+            imageNumber = value
+            incrementComponentIndex -= 1
+        }
+
+        guard incrementComponentIndex >= 0,
+              let incrementValue = Int(components[incrementComponentIndex]) else { return nil }
+
+        let baseComponents = components[..<incrementComponentIndex]
+        guard !baseComponents.isEmpty else { return nil }
+        let baseName = baseComponents.joined(separator: "_")
+
+        return DriveUploadMetadata.ParsedFileName(baseName: baseName, increment: incrementValue, imageNumber: imageNumber)
     }
 }

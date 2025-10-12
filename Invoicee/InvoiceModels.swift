@@ -1,7 +1,7 @@
 import Foundation
 
-struct CapturedInvoice: Identifiable, Encodable, Equatable {
-    enum Method: String, Encodable {
+struct CapturedInvoice: Identifiable, Codable, Equatable {
+    enum Method: String, Codable {
         case camera
         case manual
 
@@ -69,8 +69,8 @@ struct ManualInvoiceData {
 
 }
 
-struct ManualInvoiceItem: Identifiable, Encodable, Equatable {
-    let id = UUID()
+struct ManualInvoiceItem: Identifiable, Codable, Equatable {
+    var id: UUID = UUID()
     var name: String = ""
     var quantity: String = ""
     var unitPrice: String = ""

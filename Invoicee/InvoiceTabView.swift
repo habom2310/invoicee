@@ -184,7 +184,7 @@ struct InvoiceTabView: View {
                 Task { await synchronizeWithRemoteIfPossible() }
             }
         }
-        .onChange(of: invoices) { newValue in
+        .onChange(of: invoices) { _, newValue in
             if archive.invoices != newValue {
                 InvoiceArchive.shared.update(with: newValue)
             }
@@ -194,8 +194,8 @@ struct InvoiceTabView: View {
                 invoices = updated
             }
         }
-        .onChange(of: driveConnector.state) { state in
-            if state == .linked {
+        .onChange(of: driveConnector.state) { _, newState in
+            if newState == .linked {
                 Task { await synchronizeWithRemoteIfPossible() }
             }
         }
@@ -376,7 +376,7 @@ extension InvoiceTabView {
 
     private func removeInvoice(_ invoice: CapturedInvoice) {
         guard let index = invoices.firstIndex(where: { $0.id == invoice.id }) else { return }
-        withAnimation {
+        _ = withAnimation {
             invoices.remove(at: index)
         }
     }
@@ -443,7 +443,7 @@ extension InvoiceTabView {
                     VStack(alignment: .leading, spacing: 8) {
                         MultiDatePicker("Select dates", selection: $selectedDateComponents)
                             .environment(\.locale, Locale(identifier: "en_US_POSIX"))
-                            .onChange(of: selectedDateComponents) { newValue in
+                            .onChange(of: selectedDateComponents) { _, newValue in
                                 enforceDateSelectionLimit(newValue)
                             }
                     }

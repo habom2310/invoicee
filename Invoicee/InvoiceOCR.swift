@@ -52,7 +52,7 @@ enum InvoiceOCRProcessor {
         let handler = VNImageRequestHandler(cgImage: cgImage, options: [:])
         try handler.perform([request])
 
-        guard let observations = request.results as? [VNRecognizedTextObservation], !observations.isEmpty else {
+        guard let observations = request.results, !observations.isEmpty else {
             throw InvoiceOCRError.recognitionFailed
         }
 
