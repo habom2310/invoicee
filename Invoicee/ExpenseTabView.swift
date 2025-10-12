@@ -107,20 +107,15 @@ struct ExpenseTabView: View {
                 }
             }
 
-            Section("\(viewModel.selectedMetric.displayName) by Category") {
-                if viewModel.categoryTotals.isEmpty {
-                    Text("No expenses recorded for \(viewModel.selectedPeriodDescription.lowercased()).")
+            Section("Supplier Breakdown") {
+                if viewModel.supplierTotals.isEmpty {
+                    Text("Supplier totals are unavailable for \(viewModel.selectedPeriodDescription.lowercased()).")
                         .foregroundStyle(.secondary)
                 } else {
-                    ForEach(viewModel.categoryTotals) { categoryTotal in
-                        HStack {
-                            Text(categoryTotal.category)
-                            Spacer()
-                            Text(categoryTotal.total.formattedCurrency())
-                                .fontWeight(.semibold)
-                                .foregroundStyle(.primary)
-                        }
-                    }
+                    ExpenseSupplierBarChart(totals: viewModel.supplierTotals,
+                                            metric: viewModel.selectedMetric)
+                        .frame(height: CGFloat(viewModel.supplierTotals.count) * 28 + 40)
+                        .padding(.vertical, 4)
                 }
             }
 

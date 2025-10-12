@@ -24,6 +24,13 @@ final class ExpenseAnalyticsViewModel: ObservableObject {
         var id: String { category }
     }
 
+    struct SupplierTotal: Identifiable {
+        let supplier: String
+        let total: Decimal
+
+        var id: String { supplier }
+    }
+
     @Published private(set) var invoices: [CapturedInvoice] = []
     @Published private(set) var isLoading = false
     @Published private(set) var errorMessage: String?
@@ -117,6 +124,26 @@ final class ExpenseAnalyticsViewModel: ObservableObject {
             .sorted { lhs, rhs in
                 if lhs.total == rhs.total {
                     return lhs.category.localizedCaseInsensitiveCompare(rhs.category) == .orderedAscending
+                }
+                return lhs.total > rhs.total
+            }
+        return totals
+    }
+
+    var supplierTotals: [SupplierTotal] {
+        let grouped = Dictionary(grouping: filteredInvoices) { invoice -> String in
+            let name = invoice.supplier.trimmed
+            return name.isEmpty ? "Unknown Supplier" : name
+        }
+
+        let totals = grouped
+            .map { key, invoices -> SupplierTotal in
+                let total = invoices.reduce(Decimal.zero) { $0 + value(for: $1) }
+                return SupplierTotal(supplier: key, total: total)
+            }
+            .sorted { lhs, rhs in
+                if lhs.total == rhs.total {
+                    return lhs.supplier.localizedCaseInsensitiveCompare(rhs.supplier) == .orderedAscending
                 }
                 return lhs.total > rhs.total
             }
