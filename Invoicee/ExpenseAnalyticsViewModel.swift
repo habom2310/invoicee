@@ -41,36 +41,55 @@ final class ExpenseAnalyticsViewModel: ObservableObject {
     }
     @Published var selectedYear: Int = Calendar.current.component(.year, from: Date()) {
         didSet {
+            guard selectedYear != oldValue else { return }
             if selectedYear > currentYear {
                 selectedYear = currentYear
                 return
             }
             normalizeMonthForCurrentSelection()
+            propagatePeriodChange()
         }
     }
     @Published var selectedMonth: Int = Calendar.current.component(.month, from: Date()) {
         didSet {
+            guard selectedMonth != oldValue else { return }
             let allowedMonths = availableMonths(for: selectedYear)
             guard !allowedMonths.isEmpty else { return }
             if !allowedMonths.contains(selectedMonth) {
-                selectedMonth = allowedMonths.last ?? selectedMonth
+                if selectedYear == currentYear {
+                    selectedMonth = allowedMonths.last ?? selectedMonth
+                } else {
+                    selectedMonth = allowedMonths.first ?? selectedMonth
+                }
+                return
             }
             updatePreviousMonthData()
+            propagatePeriodChange()
         }
     }
 
     private let archive: InvoiceArchive
     private let calendar: Calendar
     private var cancellables = Set<AnyCancellable>()
+    private let periodStore: ReportingPeriodStore?
+    private var periodCancellable: AnyCancellable?
+    private var isApplyingExternalPeriod = false
 
     @Published private(set) var previousMonthTotals: [CategoryTotal] = []
     @Published private(set) var previousMonthDescription: String? = nil
 
     init(archive: InvoiceArchive? = nil,
-         calendar: Calendar = .current) {
+         calendar: Calendar = .current,
+         periodStore: ReportingPeriodStore? = nil) {
         let resolvedArchive = archive ?? InvoiceArchive.shared
         self.archive = resolvedArchive
         self.calendar = calendar
+        self.periodStore = periodStore
+
+        if let store = periodStore {
+            selectedYear = store.selectedYear
+            selectedMonth = store.selectedMonth
+        }
 
         resolvedArchive.$invoices
             .receive(on: RunLoop.main)
@@ -88,6 +107,11 @@ final class ExpenseAnalyticsViewModel: ObservableObject {
         invoices = resolvedArchive.invoices
         updatePreviousMonthData()
         syncSelectionWithBounds()
+
+        if let store = periodStore {
+            observePeriodStore(store)
+            propagatePeriodChange()
+        }
     }
 
     func refresh() async {
@@ -246,6 +270,29 @@ final class ExpenseAnalyticsViewModel: ObservableObject {
         }
 
         return months.sorted()
+    }
+
+    private func observePeriodStore(_ store: ReportingPeriodStore) {
+        periodCancellable = Publishers.CombineLatest(store.$selectedMonth, store.$selectedYear)
+            .receive(on: RunLoop.main)
+            .sink { [weak self] month, year in
+                self?.applyExternalPeriod(month: month, year: year)
+            }
+    }
+
+    private func applyExternalPeriod(month: Int, year: Int) {
+        guard selectedMonth != month || selectedYear != year else { return }
+        isApplyingExternalPeriod = true
+        selectedYear = year
+        selectedMonth = month
+        syncSelectionWithBounds()
+        isApplyingExternalPeriod = false
+        propagatePeriodChange()
+    }
+
+    private func propagatePeriodChange() {
+        guard !isApplyingExternalPeriod else { return }
+        periodStore?.set(month: selectedMonth, year: selectedYear)
     }
 
     private func syncSelectionWithBounds() {

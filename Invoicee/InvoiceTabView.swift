@@ -20,10 +20,9 @@ struct InvoiceTabView: View {
 
     @State private var searchText: String = ""
     @State private var selectedCategory: String? = nil
-    @State private var selectedDateComponents: Set<DateComponents> = []
-    @State private var isShowingDatePicker = false
+    @ObservedObject private var periodStore = ReportingPeriodStore.shared
+    @State private var isShowingMonthPicker = false
     @State private var isShowingSearchSheet = false
-    @State private var previousRange: [Date]? = nil
     @State private var isExportingCSV = false
     @State private var exportDocument = CSVDocument(text: "")
 
@@ -166,6 +165,73 @@ struct InvoiceTabView: View {
                 }
                 }
             }
+            .sheet(isPresented: $isShowingMonthPicker) {
+                let monthBinding = Binding<Int>(
+                    get: { periodStore.selectedMonth },
+                    set: { newValue in
+                        periodStore.set(month: newValue, year: periodStore.selectedYear)
+                        ensurePeriodSelectionIsValid()
+                    }
+                )
+
+                let yearBinding = Binding<Int>(
+                    get: { periodStore.selectedYear },
+                    set: { newValue in
+                        var targetMonth = periodStore.selectedMonth
+                        let months = availableMonths(for: newValue)
+                        if !months.isEmpty && !months.contains(targetMonth) {
+                            if newValue == currentYear {
+                                targetMonth = months.last ?? targetMonth
+                            } else {
+                                targetMonth = months.first ?? targetMonth
+                            }
+                        }
+                        periodStore.set(month: targetMonth, year: newValue)
+                        ensurePeriodSelectionIsValid()
+                    }
+                )
+
+                NavigationStack {
+                    VStack {
+                        Text("Select Month")
+                            .font(.headline)
+                            .padding(.top)
+
+                        HStack(spacing: 0) {
+                            Picker("Month", selection: monthBinding) {
+                                ForEach(availableMonths(for: yearBinding.wrappedValue), id: \.self) { month in
+                                    Text(monthName(for: month)).tag(month)
+                                }
+                            }
+                            .pickerStyle(.wheel)
+                            .frame(maxWidth: .infinity)
+                            .frame(height: 180)
+                            .clipped()
+
+                            Picker("Year", selection: yearBinding) {
+                                ForEach(availableYears, id: \.self) { year in
+                                    Text(String(year)).tag(year)
+                                }
+                            }
+                            .pickerStyle(.wheel)
+                            .frame(maxWidth: .infinity)
+                            .frame(height: 180)
+                            .clipped()
+                        }
+                        .padding(.horizontal)
+
+                        Spacer()
+                    }
+                    .toolbar {
+                        ToolbarItem(placement: .confirmationAction) {
+                            Button("Done") {
+                                isShowingMonthPicker = false
+                            }
+                        }
+                    }
+                }
+                .presentationDetents([.height(320), .medium])
+            }
         .fileExporter(isPresented: $isExportingCSV,
                           document: exportDocument,
                           contentType: .commaSeparatedText,
@@ -176,12 +242,15 @@ struct InvoiceTabView: View {
                 case .failure(let error):
                     remoteSyncError = error.localizedDescription
                 }
-            }
+        }
         .onAppear {
             if !hasAttemptedInitialSync {
                 hasAttemptedInitialSync = true
                 invoices = archive.invoices
+                ensurePeriodSelectionIsValid()
                 Task { await synchronizeWithRemoteIfPossible() }
+            } else {
+                ensurePeriodSelectionIsValid()
             }
         }
         .onChange(of: invoices) { _, newValue in
@@ -192,6 +261,7 @@ struct InvoiceTabView: View {
         .onReceive(archive.$invoices) { updated in
             if updated != invoices {
                 invoices = updated
+                ensurePeriodSelectionIsValid()
             }
         }
         .onChange(of: driveConnector.state) { _, newState in
@@ -236,8 +306,7 @@ struct CSVDocument: FileDocument {
 extension InvoiceTabView {
     private var filtersActive: Bool {
         !searchText.trimmingCharacters(in: .whitespaces).isEmpty ||
-        selectedCategory != nil ||
-        !selectedDates.isEmpty
+        selectedCategory != nil
     }
 
     private var filteredInvoices: [CapturedInvoice] {
@@ -257,34 +326,18 @@ extension InvoiceTabView {
                 matchesCategory = true
             }
 
-            let matchesDate: Bool
-            if selectedDates.isEmpty {
-                matchesDate = true
-            } else if selectedDates.count == 1 {
-                matchesDate = Calendar.current.isDate(invoice.date, inSameDayAs: selectedDates[0])
-            } else if let range = normalizedDateRange() {
-                matchesDate = invoice.date >= range.lowerBound && invoice.date <= range.upperBound
-            } else {
-                matchesDate = true
-            }
+            let invoiceComponents = Calendar.current.dateComponents([.year, .month], from: invoice.date)
+            let matchesDate = invoiceComponents.year == periodStore.selectedYear &&
+                              invoiceComponents.month == periodStore.selectedMonth
 
             return matchesSearch && matchesCategory && matchesDate
         }
         .sorted { $0.date > $1.date }
     }
 
-    private func normalizedDateRange() -> ClosedRange<Date>? {
-        let sortedDates = selectedDates.sorted()
-        guard sortedDates.count >= 2 else { return nil }
-        return sortedDates.first!...sortedDates.last!
-    }
-
     private func clearFilters() {
         searchText = ""
         selectedCategory = nil
-        selectedDateComponents = []
-        isShowingDatePicker = false
-        previousRange = nil
     }
 
     private func binding(for invoice: CapturedInvoice) -> Binding<CapturedInvoice>? {
@@ -425,11 +478,11 @@ extension InvoiceTabView {
                     }
 
                     Button {
-                        isShowingDatePicker.toggle()
+                        isShowingMonthPicker = true
                     } label: {
                         HStack(spacing: 6) {
                             Image(systemName: "calendar")
-                            Text(dateFilterLabel)
+                            Text(selectedPeriodLabel)
                                 .lineLimit(1)
                         }
                         .padding(.vertical, 6)
@@ -437,16 +490,7 @@ extension InvoiceTabView {
                         .background(Color.secondary.opacity(0.1))
                         .clipShape(RoundedRectangle(cornerRadius: 8))
                     }
-                }
-
-                if isShowingDatePicker {
-                    VStack(alignment: .leading, spacing: 8) {
-                        MultiDatePicker("Select dates", selection: $selectedDateComponents)
-                            .environment(\.locale, Locale(identifier: "en_US_POSIX"))
-                            .onChange(of: selectedDateComponents) { _, newValue in
-                                enforceDateSelectionLimit(newValue)
-                            }
-                    }
+                    .buttonStyle(.plain)
                 }
 
                 if filtersActive {
@@ -466,85 +510,92 @@ extension InvoiceTabView {
         }
     }
 
-    private var dateFilterLabel: String {
-        if selectedDates.isEmpty {
-            return "Any Date"
-        } else if selectedDates.count == 1 {
-            return selectedDates[0].formattedInvoiceDate()
-        } else if let range = normalizedDateRange() {
-            return "\(range.lowerBound.formattedInvoiceDate()) – \(range.upperBound.formattedInvoiceDate())"
-        }
-
-        return "Any Date"
+    private var selectedPeriodLabel: String {
+        "\(shortMonthName(for: periodStore.selectedMonth))-\(periodStore.selectedYear)"
     }
 
-    private var selectedDates: [Date] {
-        let calendar = Calendar.current
-        return selectedDateComponents.compactMap { calendar.date(from: $0) }
-            .map { calendar.startOfDay(for: $0) }
-            .sorted()
+    private var availableYears: [Int] {
+        var years = Set(invoices.map { Calendar.current.component(.year, from: $0.date) })
+        years.insert(currentYear)
+        return years.filter { $0 <= currentYear }.sorted()
     }
 
-    private func enforceDateSelectionLimit(_ newValue: Set<DateComponents>) {
-        let calendar = Calendar.current
-        let sorted = newValue.compactMap { calendar.date(from: $0) }
-            .map { calendar.startOfDay(for: $0) }
-            .sorted()
+    private var availableMonths: [Int] {
+        availableMonths(for: periodStore.selectedYear)
+    }
 
-        guard let first = sorted.first else {
-            selectedDateComponents.removeAll()
-            previousRange = nil
-            return
+    private func availableMonths(for year: Int) -> [Int] {
+        let calendar = Calendar.current
+        var months = Set(invoices
+            .filter { calendar.component(.year, from: $0.date) == year }
+            .map { calendar.component(.month, from: $0.date) })
+
+        if year == currentYear {
+            months.formUnion(1...currentMonth)
+        } else if year < currentYear {
+            months.formUnion(1...12)
         }
 
-        let newSet = Set(sorted)
-
-        if let previousSelection = previousRange {
-            let previousSet = Set(previousSelection.map { calendar.startOfDay(for: $0) })
-            if newSet == previousSet {
-                return
+        if months.isEmpty {
+            if year == currentYear {
+                months.formUnion(1...currentMonth)
+            } else {
+                months.formUnion(1...12)
             }
         }
 
-        switch sorted.count {
-        case 1:
-            selectedDateComponents = [calendar.dateComponents([.year, .month, .day], from: first)]
-            previousRange = nil
-        case 2:
-            if let last = sorted.last {
-                updateSelectionForRange(start: first, end: last)
-            }
-        default:
-            if let last = sorted.last {
-                selectedDateComponents = [calendar.dateComponents([.year, .month, .day], from: last)]
-            }
-            previousRange = nil
+        return months.sorted()
+    }
+
+    private func monthName(for month: Int) -> String {
+        guard month >= 1 && month <= Self.monthSymbols.count else { return "Month" }
+        return Self.monthSymbols[month - 1]
+    }
+
+    private func shortMonthName(for month: Int) -> String {
+        guard month >= 1 && month <= Self.shortMonthSymbols.count else { return "Mon" }
+        return Self.shortMonthSymbols[month - 1]
+    }
+
+    private func ensurePeriodSelectionIsValid() {
+        let years = availableYears
+        var targetYear = periodStore.selectedYear
+        if !years.contains(targetYear), let replacement = years.last {
+            targetYear = replacement
         }
-    }
 
-    private func updateSelectionForRange(start: Date, end: Date) {
-        let calendar = Calendar.current
-        let rangeDates = datesBetween(start, end)
-        previousRange = rangeDates
-        let components = rangeDates.map { calendar.dateComponents([.year, .month, .day], from: $0) }
-        selectedDateComponents = Set(components)
-    }
+        let months = availableMonths(for: targetYear)
+        guard !months.isEmpty else { return }
 
-    private func datesBetween(_ start: Date, _ end: Date) -> [Date] {
-        let calendar = Calendar.current
-        let startDay = calendar.startOfDay(for: start)
-        let endDay = calendar.startOfDay(for: end)
-        guard startDay <= endDay else { return [] }
-
-        var dates: [Date] = []
-        var current = startDay
-        while current <= endDay {
-            dates.append(current)
-            guard let next = calendar.date(byAdding: .day, value: 1, to: current) else { break }
-            current = next
+        var targetMonth = periodStore.selectedMonth
+        if !months.contains(targetMonth) {
+            if targetYear == currentYear {
+                targetMonth = months.last ?? targetMonth
+            } else {
+                targetMonth = months.first ?? targetMonth
+            }
         }
-        return dates
+
+        periodStore.set(month: targetMonth, year: targetYear)
     }
+
+    private var currentYear: Int {
+        Calendar.current.component(.year, from: Date())
+    }
+
+    private var currentMonth: Int {
+        Calendar.current.component(.month, from: Date())
+    }
+
+    private static let monthSymbols: [String] = {
+        let formatter = DateFormatter()
+        return formatter.monthSymbols ?? []
+    }()
+
+    private static let shortMonthSymbols: [String] = {
+        let formatter = DateFormatter()
+        return formatter.shortMonthSymbols ?? []
+    }()
 }
 
 struct CapturedInvoiceRow: View {

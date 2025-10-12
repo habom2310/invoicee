@@ -1,7 +1,7 @@
 import SwiftUI
 
 struct ExpenseTabView: View {
-    @StateObject private var viewModel = ExpenseAnalyticsViewModel()
+    @StateObject private var viewModel = ExpenseAnalyticsViewModel(periodStore: ReportingPeriodStore.shared)
     @State private var isShowingMonthPicker = false
     @State private var comparisonContext: ExpenseComparisonContext? = nil
 
