@@ -1,5 +1,6 @@
 import SwiftUI
 
+/// Horizontal bar chart breaking down totals by supplier.
 struct ExpenseSupplierBarChart: View {
     let totals: [ExpenseAnalyticsViewModel.SupplierTotal]
     let metric: ExpenseAnalyticsViewModel.Metric

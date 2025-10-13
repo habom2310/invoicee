@@ -1,7 +1,12 @@
 import SwiftUI
 
+/// Hosts account preferences and Google Drive linking flows.
 struct ProfileTabView: View {
-    @StateObject private var driveLinkViewModel = GoogleDriveLinkViewModel(connector: GoogleDriveConnector.shared)
+    @StateObject private var driveLinkViewModel: GoogleDriveLinkViewModel
+
+    init(viewModel: @autoclosure @escaping () -> GoogleDriveLinkViewModel) {
+        _driveLinkViewModel = StateObject(wrappedValue: viewModel())
+    }
 
     var body: some View {
         NavigationStack {
@@ -64,6 +69,7 @@ struct ProfileTabView: View {
     }
 }
 
+/// Detailed controls for linking and managing Google Drive sync.
 struct GoogleDriveSettingsView: View {
     @ObservedObject var viewModel: GoogleDriveLinkViewModel
     @State private var showingUnlinkConfirmation = false
@@ -163,7 +169,7 @@ struct GoogleDriveSettingsView: View {
     }
 }
 
-private extension GoogleDriveLinkViewModel.AuthorizationState {
+private extension GoogleDriveAuthorizationState {
     var label: String {
         switch self {
         case .signedOut: "Not linked"

@@ -1,19 +1,26 @@
 import Foundation
 
+/// Pulls remote invoices into the local archive when Drive is linked.
 @MainActor
 final class InvoiceRemoteSynchronizer {
-    static let shared = InvoiceRemoteSynchronizer()
-
+    private let connector: GoogleDriveConnector
+    private let archive: InvoiceArchive
+    private let firestoreUploader: InvoiceFirestoreUploading
     private var isSyncing = false
 
-    private init() {}
+    init(connector: GoogleDriveConnector,
+         archive: InvoiceArchive,
+         firestoreUploader: InvoiceFirestoreUploading) {
+        self.connector = connector
+        self.archive = archive
+        self.firestoreUploader = firestoreUploader
+    }
 
     /// Synchronizes invoices from Firestore into the local archive if the user is linked.
     /// - Returns: `true` when new or updated invoices were merged into the archive.
     func synchronizeFromRemote() async throws -> Bool {
         guard !isSyncing else { return false }
 
-        let connector = GoogleDriveConnector.shared
         guard connector.authorizationState() == .linked,
               let userID = connector.transferService.currentUserID else {
             return false
@@ -22,10 +29,10 @@ final class InvoiceRemoteSynchronizer {
         isSyncing = true
         defer { isSyncing = false }
 
-        let remoteInvoices = try await InvoiceFirestoreUploader.shared.fetchInvoices(for: userID)
+        let remoteInvoices = try await firestoreUploader.fetchInvoices(for: userID)
         guard !remoteInvoices.isEmpty else { return false }
 
-        let localInvoices = InvoiceArchive.shared.invoices
+        let localInvoices = archive.invoices
         var mergedInvoices = Dictionary(uniqueKeysWithValues: localInvoices.map { ($0.id, $0) })
         var didChange = false
 
@@ -52,7 +59,7 @@ final class InvoiceRemoteSynchronizer {
             return lhs.date > rhs.date
         }
 
-        InvoiceArchive.shared.update(with: mergedList)
+        archive.update(with: mergedList)
         return true
     }
 }

@@ -1,8 +1,10 @@
 import Foundation
 import Combine
 
+/// Produces aggregated metrics for expenses by month, category, and supplier.
 @MainActor
 final class ExpenseAnalyticsViewModel: ObservableObject {
+    /// Determines which monetary value the charts emphasise.
     enum Metric: String, CaseIterable, Identifiable {
         case totalAmount
         case ourAmount
@@ -78,11 +80,14 @@ final class ExpenseAnalyticsViewModel: ObservableObject {
     @Published private(set) var previousMonthTotals: [CategoryTotal] = []
     @Published private(set) var previousMonthDescription: String? = nil
 
-    init(archive: InvoiceArchive? = nil,
+    /// - Parameters:
+    ///   - archive: Source of captured invoices.
+    ///   - calendar: Calendar used to derive reporting periods.
+    ///   - periodStore: Optional shared selection store to keep views in sync.
+    init(archive: InvoiceArchive,
          calendar: Calendar = .current,
          periodStore: ReportingPeriodStore? = nil) {
-        let resolvedArchive = archive ?? InvoiceArchive.shared
-        self.archive = resolvedArchive
+        self.archive = archive
         self.calendar = calendar
         self.periodStore = periodStore
 
@@ -91,7 +96,7 @@ final class ExpenseAnalyticsViewModel: ObservableObject {
             selectedMonth = store.selectedMonth
         }
 
-        resolvedArchive.$invoices
+        archive.$invoices
             .receive(on: RunLoop.main)
             .sink { [weak self] invoices in
                 guard let self else { return }
@@ -104,7 +109,7 @@ final class ExpenseAnalyticsViewModel: ObservableObject {
             }
             .store(in: &cancellables)
 
-        invoices = resolvedArchive.invoices
+        invoices = archive.invoices
         updatePreviousMonthData()
         syncSelectionWithBounds()
 
@@ -114,6 +119,7 @@ final class ExpenseAnalyticsViewModel: ObservableObject {
         }
     }
 
+    /// Recomputes totals after any invoices change.
     func refresh() async {
         guard !isLoading else { return }
 
@@ -135,6 +141,7 @@ final class ExpenseAnalyticsViewModel: ObservableObject {
         totalForSelection.formattedCurrency()
     }
 
+    /// Aggregated totals grouped by invoice category for the selected month.
     var categoryTotals: [CategoryTotal] {
         let grouped = Dictionary(grouping: filteredInvoices) { invoice -> String in
             invoice.category ?? "Uncategorized"
@@ -154,6 +161,7 @@ final class ExpenseAnalyticsViewModel: ObservableObject {
         return totals
     }
 
+    /// Aggregated totals grouped by supplier name for the selected month.
     var supplierTotals: [SupplierTotal] {
         let grouped = Dictionary(grouping: filteredInvoices) { invoice -> String in
             let name = invoice.supplier.trimmed
@@ -197,8 +205,11 @@ final class ExpenseAnalyticsViewModel: ObservableObject {
     }
 
     func monthName(for month: Int, short: Bool = false) -> String {
-        guard month >= 1 && month <= Self.monthSymbols.count else { return "Month" }
-        return short ? Self.shortMonthSymbols[month - 1] : Self.monthSymbols[month - 1]
+        guard month >= 1 && month <= ReportingDateFormatter.monthSymbols.count else { return "Month" }
+        if short {
+            return ReportingDateFormatter.shortName(for: month)
+        }
+        return ReportingDateFormatter.monthSymbols[month - 1]
     }
 
     private var filteredInvoices: [CapturedInvoice] {
@@ -352,13 +363,6 @@ final class ExpenseAnalyticsViewModel: ObservableObject {
         calendar.component(.month, from: Date())
     }
 
-    private static let monthSymbols: [String] = {
-        let formatter = DateFormatter()
-        return formatter.monthSymbols ?? []
-    }()
-
-    private static let shortMonthSymbols: [String] = {
-        let formatter = DateFormatter()
-        return formatter.shortMonthSymbols ?? []
-    }()
+    private static let monthSymbols = ReportingDateFormatter.monthSymbols
+    private static let shortMonthSymbols = ReportingDateFormatter.shortMonthSymbols
 }

@@ -1,7 +1,12 @@
 import SwiftUI
 
+/// Summarises expenses and charts trends over time.
 struct ExpenseTabView: View {
-    @StateObject private var viewModel = ExpenseAnalyticsViewModel(periodStore: ReportingPeriodStore.shared)
+    @StateObject private var viewModel: ExpenseAnalyticsViewModel
+
+    init(viewModel: @autoclosure @escaping () -> ExpenseAnalyticsViewModel) {
+        _viewModel = StateObject(wrappedValue: viewModel())
+    }
     @State private var isShowingMonthPicker = false
     @State private var comparisonContext: ExpenseComparisonContext? = nil
 

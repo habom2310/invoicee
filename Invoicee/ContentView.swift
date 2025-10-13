@@ -8,6 +8,8 @@
 import SwiftUI
 
 struct ContentView: View {
+    @EnvironmentObject private var appEnvironment: AppEnvironment
+
     var body: some View {
         TabView {
             InvoiceTabView()
@@ -15,12 +17,13 @@ struct ContentView: View {
                     Label("Invoice", systemImage: "doc.text.viewfinder")
                 }
 
-            ExpenseTabView()
+            ExpenseTabView(viewModel: ExpenseAnalyticsViewModel(archive: appEnvironment.invoiceArchive,
+                                                                 periodStore: appEnvironment.reportingPeriodStore))
                 .tabItem {
                     Label("Expense", systemImage: "chart.pie")
                 }
 
-            ProfileTabView()
+            ProfileTabView(viewModel: appEnvironment.makeDriveLinkViewModel())
                 .tabItem {
                     Label("Profile", systemImage: "person.crop.circle")
                 }
@@ -29,5 +32,11 @@ struct ContentView: View {
 }
 
 #Preview {
-    ContentView()
+    let environment = AppEnvironment.makeDefault()
+    return ContentView()
+        .environmentObject(environment)
+        .environmentObject(environment.invoiceArchive)
+        .environmentObject(environment.reportingPeriodStore)
+        .environmentObject(environment.driveConnector)
+        .environmentObject(environment.categoryStore)
 }

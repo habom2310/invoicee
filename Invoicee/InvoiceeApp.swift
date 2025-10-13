@@ -12,6 +12,8 @@ import FirebaseCore
 
 @main
 struct InvoiceeApp: App {
+    @StateObject private var environment = AppEnvironment.makeDefault()
+
     init() {
 #if canImport(FirebaseCore)
         FirebaseApp.configure()
@@ -21,6 +23,11 @@ struct InvoiceeApp: App {
     var body: some Scene {
         WindowGroup {
             ContentView()
+                .environmentObject(environment)
+                .environmentObject(environment.invoiceArchive)
+                .environmentObject(environment.reportingPeriodStore)
+                .environmentObject(environment.driveConnector)
+                .environmentObject(environment.categoryStore)
         }
     }
 }

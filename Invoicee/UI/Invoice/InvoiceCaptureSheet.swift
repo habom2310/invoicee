@@ -5,12 +5,13 @@ import Foundation
 import UIKit
 #endif
 
+/// Handles camera/manual entry for capturing a new invoice.
 struct InvoiceCaptureSheet: View {
     @ObservedObject private var categoryStore: InvoiceCategoryStore
     @Binding var isPresented: Bool
     var onSubmit: (CapturedInvoice) -> Void
 
-    init(categoryStore: InvoiceCategoryStore = .shared,
+    init(categoryStore: InvoiceCategoryStore,
          knownSuppliers: [String] = [],
          isPresented: Binding<Bool>,
          onSubmit: @escaping (CapturedInvoice) -> Void) {

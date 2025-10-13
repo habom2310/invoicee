@@ -1,5 +1,6 @@
 import SwiftUI
 
+/// Horizontal bar chart showing category totals for the current period.
 struct ExpenseCategoryBarChart: View {
     let totals: [ExpenseAnalyticsViewModel.CategoryTotal]
     let metric: ExpenseAnalyticsViewModel.Metric

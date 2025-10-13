@@ -1,6 +1,8 @@
 import Foundation
 
+/// Represents a captured invoice and its metadata across manual and camera flows.
 struct CapturedInvoice: Identifiable, Codable, Equatable {
+    /// Describes how the invoice entered the system.
     enum Method: String, Codable {
         case camera
         case manual
@@ -50,6 +52,7 @@ struct CapturedInvoice: Identifiable, Codable, Equatable {
     }
 }
 
+/// Captures the in-progress state for manual invoice entry.
 struct ManualInvoiceData {
     var supplier: String = ""
     var totalAmount: Decimal?
@@ -66,9 +69,9 @@ struct ManualInvoiceData {
     var isValid: Bool {
         !supplier.trimmed.isEmpty && totalAmount != nil
     }
-
 }
 
+/// Item-level details for manual invoice entry.
 struct ManualInvoiceItem: Identifiable, Codable, Equatable {
     var id: UUID = UUID()
     var name: String = ""

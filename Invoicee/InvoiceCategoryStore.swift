@@ -1,23 +1,25 @@
 import Foundation
 import Combine
 
+/// Persists custom categories and supplier mappings in `UserDefaults`.
 final class InvoiceCategoryStore: ObservableObject {
-    static let shared = InvoiceCategoryStore()
-
     @Published private(set) var categories: [String]
     @Published private(set) var supplierCategories: [String: String]
 
+    private let userDefaults: UserDefaults
     private let storageKey = "invoiceCategories"
     private let supplierCategoryStorageKey = "invoiceSupplierCategories"
 
-    private init() {
-        if let saved = UserDefaults.standard.array(forKey: storageKey) as? [String] {
+    init(userDefaults: UserDefaults = .standard) {
+        self.userDefaults = userDefaults
+
+        if let saved = userDefaults.array(forKey: storageKey) as? [String] {
             categories = saved
         } else {
             categories = []
         }
 
-        if let savedMap = UserDefaults.standard.dictionary(forKey: supplierCategoryStorageKey) as? [String: String] {
+        if let savedMap = userDefaults.dictionary(forKey: supplierCategoryStorageKey) as? [String: String] {
             supplierCategories = savedMap
         } else {
             supplierCategories = [:]
@@ -66,10 +68,10 @@ final class InvoiceCategoryStore: ObservableObject {
     }
 
     private func saveCategories() {
-        UserDefaults.standard.set(categories, forKey: storageKey)
+        userDefaults.set(categories, forKey: storageKey)
     }
 
     private func saveSupplierCategories() {
-        UserDefaults.standard.set(supplierCategories, forKey: supplierCategoryStorageKey)
+        userDefaults.set(supplierCategories, forKey: supplierCategoryStorageKey)
     }
 }

@@ -3,8 +3,14 @@ import Foundation
 import FirebaseFirestore
 #endif
 
-final class InvoiceFirestoreUploader {
-    static let shared = InvoiceFirestoreUploader()
+protocol InvoiceFirestoreUploading {
+    func upload(invoice: CapturedInvoice, imageFileName: String?, userID: String) async throws
+    func delete(invoiceID: UUID) async throws
+    func fetchInvoices(for userID: String) async throws -> [CapturedInvoice]
+}
+
+/// Firebase-backed implementation of `InvoiceFirestoreUploading`.
+final class InvoiceFirestoreUploader: InvoiceFirestoreUploading {
 
 #if canImport(FirebaseFirestore)
     private let db: Firestore

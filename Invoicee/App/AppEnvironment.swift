@@ -1,0 +1,69 @@
+import Foundation
+import SwiftUI
+import Combine
+
+/// Centralises dependency wiring for the Invoicee app.
+@MainActor
+final class AppEnvironment: ObservableObject {
+    let objectWillChange = ObservableObjectPublisher()
+    let reportingPeriodStore: ReportingPeriodStore
+    let invoiceArchive: InvoiceArchive
+    let driveConnector: GoogleDriveConnector
+    let firestoreUploader: InvoiceFirestoreUploading
+    let remoteSynchronizer: InvoiceRemoteSynchronizer
+    let syncTracker: InvoiceSyncTracker
+    let categoryStore: InvoiceCategoryStore
+
+    init(reportingPeriodStore: ReportingPeriodStore,
+         invoiceArchive: InvoiceArchive,
+         driveConnector: GoogleDriveConnector,
+         firestoreUploader: InvoiceFirestoreUploading,
+         remoteSynchronizer: InvoiceRemoteSynchronizer,
+         syncTracker: InvoiceSyncTracker,
+         categoryStore: InvoiceCategoryStore) {
+        self.reportingPeriodStore = reportingPeriodStore
+        self.invoiceArchive = invoiceArchive
+        self.driveConnector = driveConnector
+        self.firestoreUploader = firestoreUploader
+        self.remoteSynchronizer = remoteSynchronizer
+        self.syncTracker = syncTracker
+        self.categoryStore = categoryStore
+    }
+
+    func makeDriveLinkViewModel() -> GoogleDriveLinkViewModel {
+        GoogleDriveLinkViewModel(connector: driveConnector, archive: invoiceArchive)
+    }
+
+    static func makeDefault() -> AppEnvironment {
+        let reportingPeriodStore = ReportingPeriodStore()
+        let syncTracker = InvoiceSyncTracker()
+        let firestoreUploader = InvoiceFirestoreUploader()
+        let transferService = GoogleDriveTransferService()
+        let syncCoordinator = GoogleDriveSyncCoordinator(transferService: transferService,
+                                                         tracker: syncTracker,
+                                                         firestoreUploader: firestoreUploader)
+        let connector = GoogleDriveConnector(transferService: transferService,
+                                             syncCoordinator: syncCoordinator,
+                                             tracker: syncTracker)
+        let invoiceArchive = InvoiceArchive(persistence: LocalInvoiceStore(),
+                                            syncScheduler: connector,
+                                            syncStatusProvider: syncTracker)
+        connector.updateInvoicesProvider { [weak invoiceArchive] in
+            invoiceArchive?.invoices ?? []
+        }
+        connector.updateSyncStatusRefresh { [weak invoiceArchive] in
+            invoiceArchive?.refreshSyncStatus()
+        }
+        let remoteSynchronizer = InvoiceRemoteSynchronizer(connector: connector,
+                                                           archive: invoiceArchive,
+                                                           firestoreUploader: firestoreUploader)
+        let categoryStore = InvoiceCategoryStore()
+        return AppEnvironment(reportingPeriodStore: reportingPeriodStore,
+                              invoiceArchive: invoiceArchive,
+                              driveConnector: connector,
+                              firestoreUploader: firestoreUploader,
+                              remoteSynchronizer: remoteSynchronizer,
+                              syncTracker: syncTracker,
+                              categoryStore: categoryStore)
+    }
+}

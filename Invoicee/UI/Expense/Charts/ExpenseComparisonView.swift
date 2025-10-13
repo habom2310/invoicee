@@ -1,5 +1,6 @@
 import SwiftUI
 
+/// Compares category totals between the selected month and the previous month.
 struct ExpenseComparisonView: View {
     let categoryTotals: [ExpenseAnalyticsViewModel.CategoryTotal]
     let previousTotals: [ExpenseAnalyticsViewModel.CategoryTotal]
