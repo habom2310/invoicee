@@ -8,7 +8,7 @@ import Security
 final class GoogleDriveTransferService: NSObject, CloudStorageTransferService {
     enum Constants {
         static let defaultFolderName = "Invoicee"
-        static let clientID = "939841720301-9r62ts1ssiqje7tv1ah15rg6do5geloh.apps.googleusercontent.com"
+        static let clientID = "164537557679-oe62eqo9fjfga92s3rl72n5ap30tvb96.apps.googleusercontent.com"
         static let redirectURI = "ha.Invoicee:/oauth2redirect/google"
         static var redirectScheme: String {
             URL(string: redirectURI)?.scheme ?? ""
