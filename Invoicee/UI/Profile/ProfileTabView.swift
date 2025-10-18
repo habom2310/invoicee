@@ -73,99 +73,124 @@ struct ProfileTabView: View {
 struct GoogleDriveSettingsView: View {
     @ObservedObject var viewModel: GoogleDriveLinkViewModel
     @State private var showingUnlinkConfirmation = false
+    @State private var requiresForceUnlink = false
 
     var body: some View {
         Form {
-            Section("Cloud Storage") {
-                Text("Connect Invoicee to a Google Drive folder to upload invoice photos and data exports.")
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
+            connectionSection
+            qualitySection
+        }
+        .navigationTitle("Google Drive")
+        .navigationBarTitleDisplayMode(.inline)
+        .alert(unlinkAlertTitle,
+               isPresented: $showingUnlinkConfirmation,
+               actions: unlinkAlertActions,
+               message: { Text(unlinkAlertMessageText) })
+    }
+
+    private var connectionSection: some View {
+        Section("Google Drive") {
+            HStack {
+                Text("Status")
+                Spacer()
+                Text(viewModel.authorizationState.label)
+                    .foregroundStyle(viewModel.authorizationState.color)
             }
 
-            Section("Connection") {
-                VStack(alignment: .leading, spacing: 12) {
-                    HStack {
-                        Text("Status")
-                        Spacer()
-                        Text(viewModel.authorizationState.label)
-                            .foregroundStyle(viewModel.authorizationState.color)
-                    }
-
-                    if viewModel.authorizationState == .linked {
-                        Button(role: .destructive) {
-                            showingUnlinkConfirmation = true
-                        } label: {
-                            Label("Unlink Google Drive", systemImage: "link.slash")
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                        }
-                        .buttonStyle(.borderedProminent)
-
-                        Text("Invoices sync automatically whenever you add or edit them.")
-                            .font(.footnote)
-                            .foregroundStyle(.secondary)
-                    } else {
-                        Button(action: viewModel.linkAccount) {
-                            Label("Link Google Drive", systemImage: "link")
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                        }
-                        .buttonStyle(.borderedProminent)
-                        .disabled(viewModel.authorizationState == .authorizing)
-                    }
-
-                    if let folderName = viewModel.linkedFolderName {
-                        HStack {
-                            Text("Target Folder")
-                            Spacer()
-                            Text(folderName)
-                                .foregroundStyle(.secondary)
-                        }
-                    }
-
-                    if let errorMessage = viewModel.errorMessage {
-                        Text(errorMessage)
-                            .font(.footnote)
-                            .foregroundStyle(.red)
-                    }
-
-                    if viewModel.isSyncing {
-                        HStack(spacing: 8) {
-                            ProgressView()
-                            Text("Syncing…")
-                                .font(.footnote)
-                                .foregroundStyle(.secondary)
-                        }
-                    }
-                    if let syncMessage = viewModel.syncStatusMessage {
-                        Text(syncMessage)
-                            .font(.footnote)
-                            .foregroundStyle(.secondary)
-                    }
+            if let accountName = viewModel.accountDisplayName, viewModel.authorizationState == .linked {
+                HStack {
+                    Text("Account")
+                    Spacer()
+                    Text(accountName)
+                        .foregroundStyle(.secondary)
                 }
             }
 
-            Section("Image Quality") {
-                Picker("Upload Size", selection: $viewModel.imageQuality) {
-                    ForEach(InvoiceImageQuality.allCases) { option in
-                        Text(option.displayName).tag(option)
-                    }
+            if viewModel.authorizationState == .linked {
+                if viewModel.hasUnsyncedInvoices {
+                    Label("You have invoices waiting to sync. Please sync before unlinking.",
+                          systemImage: "exclamationmark.triangle.fill")
+                        .font(.footnote)
+                        .foregroundStyle(.orange)
                 }
-                .pickerStyle(.menu)
 
-                Text(viewModel.imageQuality.description)
+                Button(role: .destructive) {
+                    requiresForceUnlink = viewModel.hasUnsyncedInvoices
+                    showingUnlinkConfirmation = true
+                } label: {
+                    Label("Unlink Google Drive", systemImage: "link.slash")
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(viewModel.isSyncing)
+                .tint(.red)
+            } else {
+                Button(action: viewModel.linkAccount) {
+                    Label("Link Google Drive", systemImage: "link")
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(viewModel.authorizationState == .authorizing)
+            }
+
+            if let errorMessage = viewModel.errorMessage {
+                Text(errorMessage)
+                    .font(.footnote)
+                    .foregroundStyle(.red)
+            }
+
+            if let syncMessage = viewModel.syncStatusMessage {
+                Text(syncMessage)
                     .font(.footnote)
                     .foregroundStyle(.secondary)
             }
         }
-        .navigationTitle("Google Drive")
-        .navigationBarTitleDisplayMode(.inline)
-        .alert("Unlink Google Drive?", isPresented: $showingUnlinkConfirmation) {
-            Button("Unlink", role: .destructive) {
-                viewModel.unlinkAccount()
+    }
+
+    private var qualitySection: some View {
+        Section("Image Quality") {
+            Picker("Upload Size", selection: $viewModel.imageQuality) {
+                ForEach(InvoiceImageQuality.allCases) { option in
+                    Text(option.displayName).tag(option)
+                }
             }
-            Button("Cancel", role: .cancel) {}
-        } message: {
-            Text("Invoices will no longer sync with Google Drive until you link the account again.")
+            .pickerStyle(.menu)
+
+            Text(viewModel.imageQuality.description)
+                .font(.footnote)
+                .foregroundStyle(.secondary)
         }
+    }
+
+    private var unlinkAlertTitle: String {
+        requiresForceUnlink ? "Unsynced Invoices Detected" : "Unlink Google Drive?"
+    }
+
+    private var unlinkAlertMessageText: String {
+        if requiresForceUnlink {
+            return "There are invoices that have not been synced yet. Sync them now to avoid losing changes. You can also unlink anyway to remove the unsynced invoices from this device."
+        } else {
+            return "Invoices will no longer sync with Google Drive until you link the account again."
+        }
+    }
+
+    @ViewBuilder
+    private func unlinkAlertActions() -> some View {
+        if requiresForceUnlink {
+            Button("Sync Now") {
+                showingUnlinkConfirmation = false
+                viewModel.syncInvoices()
+            }
+            Button("Unlink Anyway", role: .destructive) {
+                viewModel.unlinkAccount(force: true)
+            }
+        } else {
+            Button("Unlink", role: .destructive) {
+                viewModel.unlinkAccount(force: false)
+            }
+        }
+
+        Button("Cancel", role: .cancel) {}
     }
 }
 

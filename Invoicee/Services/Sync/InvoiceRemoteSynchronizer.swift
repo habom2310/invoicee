@@ -22,7 +22,7 @@ final class InvoiceRemoteSynchronizer {
         guard !isSyncing else { return false }
 
         guard connector.authorizationState() == .linked,
-              let userID = connector.transferService.currentUserID else {
+              let userID = connector.currentAccountID else {
             return false
         }
 

@@ -31,9 +31,19 @@ final class InvoiceFirestoreUploader: InvoiceFirestoreUploading {
     }
 
     func fetchInvoices(for userID: String) async throws -> [CapturedInvoice] {
-        let snapshot = try await db.collection("invoices")
-            .whereField("userID", isEqualTo: userID)
+        let collection = db.collection("invoices")
+        let primary = try await collection
+            .whereField("driveAccountID", isEqualTo: userID)
             .getDocuments()
+
+        let snapshot: QuerySnapshot
+        if primary.isEmpty {
+            snapshot = try await collection
+                .whereField("userID", isEqualTo: userID)
+                .getDocuments()
+        } else {
+            snapshot = primary
+        }
 
         return snapshot.documents.compactMap { document in
             Self.invoice(from: document.data(), documentID: document.documentID)
@@ -69,7 +79,9 @@ final class InvoiceFirestoreUploader: InvoiceFirestoreUploading {
             "hasImage": invoice.imageData != nil,
             "imageFileName": (imageFileName ?? invoice.remoteImageFileName) as Any,
             "lastEdited": Timestamp(date: invoice.lastEdited),
-            "userID": userID
+            "userID": userID,
+            "driveAccountID": userID,
+            "last_updated": Timestamp(date: Date())
         ]
 
         let items = invoice.items.map { item -> [String: Any] in
@@ -104,7 +116,9 @@ final class InvoiceFirestoreUploader: InvoiceFirestoreUploading {
         let category = categoryValue?.isEmpty == true ? nil : categoryValue
 
         let lastEdited: Date
-        if let lastEditedTimestamp = data["lastEdited"] as? Timestamp {
+        if let updated = data["last_updated"] as? Timestamp {
+            lastEdited = updated.dateValue()
+        } else if let lastEditedTimestamp = data["lastEdited"] as? Timestamp {
             lastEdited = lastEditedTimestamp.dateValue()
         } else {
             lastEdited = date

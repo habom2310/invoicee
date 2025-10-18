@@ -50,6 +50,36 @@ struct InvoiceTabView: View {
                 } else {
                     ZStack(alignment: .bottomTrailing) {
                         List {
+                            if let linkIssue = driveConnector.linkIssueMessage {
+                                Section {
+                                    VStack(alignment: .leading, spacing: 8) {
+                                        Label(linkIssue, systemImage: "exclamationmark.triangle.fill")
+                                            .foregroundStyle(.orange)
+                                            .font(.footnote)
+                                            .multilineTextAlignment(.leading)
+
+                                        if driveConnector.state == .signedOut {
+                                            Button {
+                                                Task { await driveConnector.linkAccount() }
+                                            } label: {
+                                                Label("Relink Google Drive", systemImage: "link")
+                                                    .font(.footnote)
+                                            }
+                                            .buttonStyle(.borderless)
+                                        } else if driveConnector.state == .failed {
+                                            Button {
+                                                driveConnector.refreshLinkState()
+                                            } label: {
+                                                Label("Retry Connection Check", systemImage: "arrow.clockwise")
+                                                    .font(.footnote)
+                                            }
+                                            .buttonStyle(.borderless)
+                                        }
+                                    }
+                                    .padding(.vertical, 4)
+                                }
+                            }
+
                             if let remoteSyncError {
                                 Section {
                                     Label(remoteSyncError, systemImage: "exclamationmark.triangle")

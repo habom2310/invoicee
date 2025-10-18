@@ -1,14 +1,15 @@
 import Foundation
 import Combine
 
-/// View model backing the Google Drive linking UI.
+/// View model backing the Google Drive section in the profile tab.
 @MainActor
 final class GoogleDriveLinkViewModel: ObservableObject {
     @Published private(set) var authorizationState: GoogleDriveAuthorizationState
-    @Published private(set) var linkedFolderName: String?
+    @Published private(set) var accountDisplayName: String?
     @Published private(set) var errorMessage: String?
-    @Published private(set) var isSyncing: Bool = false
+    @Published private(set) var isSyncing: Bool
     @Published private(set) var syncStatusMessage: String?
+    @Published private(set) var hasUnsyncedInvoices: Bool
     @Published var imageQuality: InvoiceImageQuality {
         didSet {
             UserDefaults.standard.set(imageQuality.rawValue, forKey: GoogleDriveConnector.imageQualityPreferenceKey)
@@ -17,41 +18,52 @@ final class GoogleDriveLinkViewModel: ObservableObject {
 
     private let connector: GoogleDriveConnector
     private let archive: InvoiceArchive
-    private var subscriptions = Set<AnyCancellable>()
-
     init(connector: GoogleDriveConnector, archive: InvoiceArchive) {
         self.connector = connector
         self.archive = archive
         authorizationState = connector.authorizationState()
-        linkedFolderName = connector.linkedFolderName
+        accountDisplayName = connector.accountDisplayName
+        errorMessage = connector.linkIssueMessage
+        isSyncing = connector.isSyncing
+        syncStatusMessage = connector.lastSyncSummary
+        hasUnsyncedInvoices = connector.hasUnsyncedInvoices
         imageQuality = InvoiceImageQuality(rawValue: UserDefaults.standard.string(forKey: GoogleDriveConnector.imageQualityPreferenceKey) ?? "") ?? .large
 
         connector.$state
             .receive(on: DispatchQueue.main)
             .assign(to: &$authorizationState)
 
-        connector.$linkedFolderName
+        connector.$accountDisplayName
             .receive(on: DispatchQueue.main)
-            .assign(to: &$linkedFolderName)
+            .assign(to: &$accountDisplayName)
+
+        connector.$linkIssueMessage
+            .receive(on: DispatchQueue.main)
+            .assign(to: &$errorMessage)
+
+        connector.$isSyncing
+            .receive(on: DispatchQueue.main)
+            .assign(to: &$isSyncing)
+
+        connector.$lastSyncSummary
+            .receive(on: DispatchQueue.main)
+            .assign(to: &$syncStatusMessage)
+
+        connector.$hasUnsyncedInvoices
+            .receive(on: DispatchQueue.main)
+            .assign(to: &$hasUnsyncedInvoices)
     }
 
     func linkAccount() {
         errorMessage = nil
         syncStatusMessage = nil
-
-        Task {
-            await connector.linkAccount()
-            if connector.state == .failed {
-                await MainActor.run {
-                    self.errorMessage = self.connectorStateErrorMessage()
-                }
-            }
-        }
+        Task { await connector.linkAccount() }
     }
 
-    func unlinkAccount() {
-        connector.unlinkAccount()
-        syncStatusMessage = nil
+    func unlinkAccount(force: Bool) {
+        Task {
+            _ = await connector.unlinkAccount(force: force)
+        }
     }
 
     func syncInvoices() {
@@ -63,40 +75,20 @@ final class GoogleDriveLinkViewModel: ObservableObject {
             return
         }
 
-        let invoices = archive.invoices
-        guard !invoices.isEmpty else {
+        guard !archive.invoices.isEmpty else {
             syncStatusMessage = "No invoices available to sync."
             return
         }
 
-        isSyncing = true
-        syncStatusMessage = "Preparing invoices for sync…"
-
         Task {
             do {
-                let quality = self.imageQuality
-                let syncedCount = try await connector.syncInvoices(invoices, quality: quality)
-                self.isSyncing = false
-                self.errorMessage = nil
-                if syncedCount == 0 {
-                    self.syncStatusMessage = "All invoices already synced."
-                } else if syncedCount == 1 {
-                    self.syncStatusMessage = "Synced 1 invoice to Google Drive and Firestore."
-                } else {
-                    self.syncStatusMessage = "Synced \(syncedCount) invoices to Google Drive and Firestore."
-                }
+                try await connector.syncNow(quality: imageQuality)
             } catch {
-                self.isSyncing = false
-                self.syncStatusMessage = nil
-                self.errorMessage = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+                let message = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+                await MainActor.run {
+                    self.errorMessage = message
+                }
             }
         }
-    }
-
-    private func connectorStateErrorMessage() -> String {
-        if let error = (connector.transferService as? GoogleDriveTransferService)?.lastErrorDescription {
-            return error
-        }
-        return "Failed to link Google Drive. Please try again."
     }
 }

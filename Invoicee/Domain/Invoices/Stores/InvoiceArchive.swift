@@ -49,6 +49,11 @@ final class InvoiceArchive: ObservableObject {
         refreshSyncedState(for: invoices)
     }
 
+    func markInvoicesSynced(_ ids: [UUID]) {
+        guard !ids.isEmpty else { return }
+        syncedInvoiceIDs.formUnion(ids)
+    }
+
     private func scheduleAutoSync(for invoices: [CapturedInvoice]) {
         syncScheduler.enqueueAutoSync(with: invoices)
     }

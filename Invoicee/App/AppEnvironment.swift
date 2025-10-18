@@ -54,9 +54,23 @@ final class AppEnvironment: ObservableObject {
         connector.updateSyncStatusRefresh { [weak invoiceArchive] in
             invoiceArchive?.refreshSyncStatus()
         }
+        connector.configureArchiveHandlers(clearAll: { [weak invoiceArchive] in
+            invoiceArchive?.update(with: [])
+        }, removeInvoices: { [weak invoiceArchive] ids in
+            guard let archive = invoiceArchive else { return }
+            let remaining = archive.invoices.filter { !ids.contains($0.id) }
+            archive.update(with: remaining)
+        })
+        connector.updateSyncedRegistration { [weak invoiceArchive] ids in
+            invoiceArchive?.markInvoicesSynced(ids)
+        }
         let remoteSynchronizer = InvoiceRemoteSynchronizer(connector: connector,
                                                            archive: invoiceArchive,
                                                            firestoreUploader: firestoreUploader)
+        connector.updateRemoteFetcher { [weak remoteSynchronizer] in
+            guard let synchronizer = remoteSynchronizer else { return }
+            _ = try? await synchronizer.synchronizeFromRemote()
+        }
         let categoryStore = InvoiceCategoryStore()
         return AppEnvironment(reportingPeriodStore: reportingPeriodStore,
                               invoiceArchive: invoiceArchive,
