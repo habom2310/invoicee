@@ -77,14 +77,21 @@ struct InvoiceCaptureSheet: View {
                 }
 
                 ToolbarItem(placement: .topBarTrailing) {
-                    Button(captureMode.toggleLabel) {
-                        withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
-                            captureMode.toggle()
-                            resetCameraState()
-                            manualValidationMessage = nil
+                    if hasOCRResult {
+                        Button("Save") {
+                            saveRecognizedInvoice()
                         }
+                        .disabled(isProcessing)
+                    } else {
+                        Button(captureMode.toggleLabel) {
+                            withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
+                                captureMode.toggle()
+                                resetCameraState()
+                                manualValidationMessage = nil
+                            }
+                        }
+                        .disabled(isProcessing)
                     }
-                    .disabled(isProcessing)
                 }
             }
         }
@@ -193,12 +200,6 @@ struct InvoiceCaptureSheet: View {
 
                 if hasOCRResult {
                     ManualInvoiceFormView(data: $ocrData, validationMessage: $ocrValidationMessage, categoryStore: categoryStore)
-
-                    Button("Save") {
-                        saveRecognizedInvoice()
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .disabled(isProcessing)
                 }
 
                 Spacer(minLength: 0)

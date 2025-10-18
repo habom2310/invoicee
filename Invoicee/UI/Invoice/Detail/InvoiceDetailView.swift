@@ -228,8 +228,10 @@ struct InvoiceDetailView: View {
             image
                 .resizable()
                 .scaledToFit()
+                .frame(maxWidth: .infinity)
                 .clipShape(RoundedRectangle(cornerRadius: 12))
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     private func addItem() {
