@@ -89,11 +89,90 @@ final class GoogleDriveSyncCoordinator: GoogleDriveSyncCoordinating {
 
         for (invoice, previousRecord) in pendingInvoices {
             DriveCoordinatorLog.debug("Processing invoice \(invoice.id) dated \(invoice.date) for supplier \(invoice.supplier).")
+            let baseName = DriveUploadMetadata.baseName(for: invoice.date, supplier: invoice.supplier)
             var imageFileName: String? = nil
+            var pdfFileName: String? = nil
             var imagePathToPersist: String? = nil
+            var pdfPathToPersist: String? = nil
 
-            if invoice.imageData != nil {
-                let baseName = DriveUploadMetadata.baseName(for: invoice.date, supplier: invoice.supplier)
+            func nextIncrement(preserved: Int?, for baseName: String) -> Int {
+                if let preserved {
+                    incrementLookup[baseName] = max(incrementLookup[baseName] ?? 0, preserved)
+                    return preserved
+                }
+                let next = (incrementLookup[baseName] ?? 0) + 1
+                incrementLookup[baseName] = next
+                return next
+            }
+
+            func metadataForExistingFile(named fileName: String, defaultExtension: String) -> DriveUploadMetadata? {
+                guard let parsed = DriveUploadMetadata.parseFileName(from: fileName),
+                      parsed.baseName == baseName else {
+                    return nil
+                }
+                let ext = (fileName as NSString).pathExtension
+                let resolvedExt = ext.isEmpty ? defaultExtension : ext.lowercased()
+                incrementLookup[baseName] = max(incrementLookup[baseName] ?? 0, parsed.increment)
+                return DriveUploadMetadata(
+                    invoiceDate: invoice.date,
+                    supplier: invoice.supplier,
+                    baseFolderName: baseFolderName,
+                    fileExtension: resolvedExt,
+                    increment: parsed.increment,
+                    imageNumber: parsed.imageNumber
+                )
+            }
+
+            if let pdfData = invoice.pdfData, !pdfData.isEmpty {
+                let preservedIncrement: Int? = {
+                    guard let previousPath = previousRecord?.pdfPath,
+                          let parsed = DriveUploadMetadata.parseFileName(from: previousPath),
+                          parsed.baseName == baseName else {
+                        return nil
+                    }
+                    return parsed.increment
+                }()
+
+                let increment = nextIncrement(preserved: preservedIncrement, for: baseName)
+                let pdfMetadata = DriveUploadMetadata(
+                    invoiceDate: invoice.date,
+                    supplier: invoice.supplier,
+                    baseFolderName: baseFolderName,
+                    fileExtension: "pdf",
+                    increment: increment
+                )
+                let expectedPath = drivePath(for: pdfMetadata)
+                let needsUpload = previousRecord?.pdfPath != expectedPath
+
+                if needsUpload {
+                    DriveCoordinatorLog.debug("Invoice \(invoice.id) PDF requires update. Old path: \(previousRecord?.pdfPath ?? "nil"), new path: \(expectedPath)")
+                    if let previousPath = previousRecord?.pdfPath {
+                        try await transferService.relocateFileIfNeeded(from: previousPath, to: pdfMetadata)
+                    }
+
+                    if !driveFolderEnsured {
+                        try await transferService.ensureFolder(named: baseFolderName)
+                        driveFolderEnsured = true
+                    }
+
+                    if let pdfURL = try InvoiceDriveExporter.exportInvoicePDF(invoice, metadata: pdfMetadata) {
+                        try await transferService.upload(fileURL: pdfURL, metadata: pdfMetadata)
+                        try? FileManager.default.removeItem(at: pdfURL)
+                        DriveCoordinatorLog.info("Uploaded invoice \(invoice.id) PDF to Drive as \(pdfMetadata.fileName)")
+                    }
+                }
+
+                pdfFileName = pdfMetadata.fileName
+                pdfPathToPersist = expectedPath
+                imagePathToPersist = nil
+                imageFileName = nil
+            } else if let remotePDFName = invoice.remotePDFFileName,
+                      !remotePDFName.isEmpty,
+                      let metadata = metadataForExistingFile(named: remotePDFName, defaultExtension: "pdf") {
+                pdfFileName = remotePDFName
+                pdfPathToPersist = drivePath(for: metadata)
+                imagePathToPersist = nil
+            } else if let imageData = invoice.imageData, !imageData.isEmpty {
                 let preservedIncrement: Int? = {
                     guard let previousPath = previousRecord?.imagePath,
                           let parsed = DriveUploadMetadata.parseFileName(from: previousPath),
@@ -102,15 +181,8 @@ final class GoogleDriveSyncCoordinator: GoogleDriveSyncCoordinating {
                     }
                     return parsed.increment
                 }()
-                let increment: Int = {
-                    if let preservedIncrement {
-                        return preservedIncrement
-                    }
-                    let next = (incrementLookup[baseName] ?? 0) + 1
-                    return next
-                }()
-                incrementLookup[baseName] = max(incrementLookup[baseName] ?? 0, increment)
 
+                let increment = nextIncrement(preserved: preservedIncrement, for: baseName)
                 let imageMetadata = DriveUploadMetadata(
                     invoiceDate: invoice.date,
                     supplier: invoice.supplier,
@@ -142,12 +214,25 @@ final class GoogleDriveSyncCoordinator: GoogleDriveSyncCoordinating {
 
                 imageFileName = imageMetadata.fileName
                 imagePathToPersist = expectedPath
+                pdfPathToPersist = nil
+            } else if let remoteImageName = invoice.remoteImageFileName,
+                      !remoteImageName.isEmpty,
+                      let metadata = metadataForExistingFile(named: remoteImageName, defaultExtension: "jpg") {
+                imageFileName = remoteImageName
+                imagePathToPersist = drivePath(for: metadata)
+                pdfPathToPersist = nil
             } else {
                 imagePathToPersist = nil
+                pdfPathToPersist = nil
             }
 
-            try await firestoreUploader.upload(invoice: invoice, imageFileName: imageFileName, userID: userID)
-            await tracker.markSynced(invoice: invoice, imagePath: imagePathToPersist)
+            try await firestoreUploader.upload(invoice: invoice,
+                                               imageFileName: imageFileName,
+                                               pdfFileName: pdfFileName,
+                                               userID: userID)
+            await tracker.markSynced(invoice: invoice,
+                                     imagePath: imagePathToPersist,
+                                     pdfPath: pdfPathToPersist)
             syncedInvoices.append(invoice)
         }
 

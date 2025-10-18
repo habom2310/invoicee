@@ -1,8 +1,12 @@
 import SwiftUI
 import Foundation
+import UniformTypeIdentifiers
 
 #if canImport(UIKit)
 import UIKit
+#endif
+#if canImport(PDFKit)
+import PDFKit
 #endif
 
 /// Handles camera/manual entry for capturing a new invoice.
@@ -30,6 +34,7 @@ struct InvoiceCaptureSheet: View {
     @State private var hasOCRResult = false
     @State private var ocrValidationMessage: String?
     @State private var ocrErrorMessage: String?
+    @State private var capturedPDFData: Data?
     @State private var knownSuppliers: [String]
 
 #if canImport(VisionKit)
@@ -37,6 +42,7 @@ struct InvoiceCaptureSheet: View {
     @State private var scannedThumbnail: Image?
     @State private var isPresentingDocumentScanner = false
     @State private var isPresentingPhotoPicker = false
+    @State private var isPresentingPDFPicker = false
 #endif
 
     var body: some View {
@@ -93,6 +99,11 @@ struct InvoiceCaptureSheet: View {
                 handlePhotoLibraryResult(result)
             }
         }
+        .sheet(isPresented: $isPresentingPDFPicker) {
+            PDFDocumentPicker { result in
+                handlePDFPickerResult(result)
+            }
+        }
 #endif
     }
 
@@ -101,7 +112,7 @@ struct InvoiceCaptureSheet: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 20) {
                 if !hasOCRResult {
-                    Text("Capture an invoice with the camera or pick an existing photo. Review and edit the detected details before saving.")
+                    Text("Capture an invoice with the camera, import a PDF, or pick an existing photo. Review and edit the detected details before saving.")
                         .foregroundStyle(.secondary)
                 }
 
@@ -118,6 +129,18 @@ struct InvoiceCaptureSheet: View {
                     Spacer()
 
                     Button {
+                        isPresentingPhotoPicker = true
+                    } label: {
+                        Image(systemName: "photo.on.rectangle")
+                            .font(.system(size: 28, weight: .medium))
+                    }
+                    .buttonStyle(.bordered)
+#if os(iOS)
+                    .buttonBorderShape(.circle)
+#endif
+                    .accessibilityLabel("Select invoice from photos")
+
+                    Button {
                         startScan()
                     } label: {
                         Image(systemName: hasOCRResult ? "camera.rotate" : "camera")
@@ -130,16 +153,16 @@ struct InvoiceCaptureSheet: View {
                     .accessibilityLabel(hasOCRResult ? "Rescan invoice" : "Scan invoice")
 
                     Button {
-                        isPresentingPhotoPicker = true
+                        isPresentingPDFPicker = true
                     } label: {
-                        Image(systemName: "photo.on.rectangle")
-                            .font(.system(size: 28, weight: .medium))
+                        Image(systemName: "doc.richtext")
+                            .font(.system(size: 30, weight: .medium))
                     }
                     .buttonStyle(.bordered)
 #if os(iOS)
                     .buttonBorderShape(.circle)
 #endif
-                    .accessibilityLabel("Select invoice from photos")
+                    .accessibilityLabel("Import invoice PDF")
 
                     if hasOCRResult {
                         Button {
@@ -215,7 +238,7 @@ struct InvoiceCaptureSheet: View {
             return
         }
 
-        finalizeSubmission(from: manualData, method: .manual, imageData: nil)
+        finalizeSubmission(from: manualData, method: .manual, imageData: nil, pdfData: nil)
     }
 
     private func saveRecognizedInvoice() {
@@ -233,10 +256,13 @@ struct InvoiceCaptureSheet: View {
         }
 #endif
 
-        finalizeSubmission(from: ocrData, method: .camera, imageData: capturedImageData)
+        finalizeSubmission(from: ocrData, method: .camera, imageData: capturedImageData, pdfData: capturedPDFData)
     }
 
-    private func finalizeSubmission(from data: ManualInvoiceData, method: CapturedInvoice.Method, imageData: Data?) {
+    private func finalizeSubmission(from data: ManualInvoiceData,
+                                    method: CapturedInvoice.Method,
+                                    imageData: Data?,
+                                    pdfData: Data?) {
         guard let totalDecimal = data.totalAmount else { return }
         let sanitizedGST = GSTValidator.sanitizedAmount(for: data.gstAmount, total: data.totalAmount)
         let gstDecimal = sanitizedGST ?? 0
@@ -253,7 +279,9 @@ struct InvoiceCaptureSheet: View {
             category: data.selectedCategory,
             items: data.items,
             imageData: imageData,
+            pdfData: pdfData,
             remoteImageFileName: nil,
+            remotePDFFileName: nil,
             lastEdited: now
         )
 
@@ -276,6 +304,7 @@ struct InvoiceCaptureSheet: View {
         ocrData = ManualInvoiceData()
         ocrValidationMessage = nil
         ocrErrorMessage = nil
+        capturedPDFData = nil
 #if canImport(VisionKit)
         scannedImage = nil
         scannedThumbnail = nil
@@ -316,6 +345,7 @@ struct InvoiceCaptureSheet: View {
         case .success(let image):
             scannedImage = image
             scannedThumbnail = Image(uiImage: image)
+            capturedPDFData = nil
             extractInvoiceData(from: image)
         case .failure(let error):
             ocrErrorMessage = error.localizedDescription
@@ -327,6 +357,7 @@ struct InvoiceCaptureSheet: View {
         case .success(let image):
             scannedImage = image
             scannedThumbnail = Image(uiImage: image)
+            capturedPDFData = nil
             extractInvoiceData(from: image)
         case .failure(let error):
             if let pickerError = error as? PhotoLibraryPicker.PickerError, pickerError == .cancelled {
@@ -335,6 +366,87 @@ struct InvoiceCaptureSheet: View {
             ocrErrorMessage = error.localizedDescription
         }
     }
+
+    private func handlePDFPickerResult(_ result: Result<URL, Error>) {
+        isPresentingPDFPicker = false
+
+        switch result {
+        case .success(let url):
+            processPDF(at: url)
+        case .failure(let error):
+            if let pickerError = error as? PDFDocumentPicker.PickerError, pickerError == .cancelled {
+                return
+            }
+            ocrErrorMessage = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+        }
+    }
+
+    private func processPDF(at url: URL) {
+#if canImport(PDFKit)
+        ocrErrorMessage = nil
+        hasOCRResult = false
+        isProcessing = true
+
+        Task {
+            do {
+                let data = try loadPDFData(from: url)
+                let image = try renderFirstPageImage(from: data)
+                await MainActor.run {
+                    capturedPDFData = data
+                    scannedImage = image
+                    scannedThumbnail = Image(uiImage: image)
+                    extractInvoiceData(from: image)
+                }
+            } catch {
+                await MainActor.run {
+                    capturedPDFData = nil
+                    ocrErrorMessage = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+                    isProcessing = false
+                }
+            }
+        }
+#else
+        ocrErrorMessage = PDFImportError.unsupported.errorDescription
+        isProcessing = false
+#endif
+    }
+
+#if canImport(PDFKit)
+    private func loadPDFData(from url: URL) throws -> Data {
+        let didAccess = url.startAccessingSecurityScopedResource()
+        defer {
+            if didAccess {
+                url.stopAccessingSecurityScopedResource()
+            }
+        }
+        return try Data(contentsOf: url)
+    }
+
+    private func renderFirstPageImage(from data: Data) throws -> UIImage {
+        guard let document = PDFDocument(data: data),
+              let page = document.page(at: 0) else {
+            throw PDFImportError.invalidDocument
+        }
+
+        let pageRect = page.bounds(for: .mediaBox)
+        let rendererFormat = UIGraphicsImageRendererFormat()
+        rendererFormat.scale = UIScreen.main.scale * 2
+        rendererFormat.opaque = true
+        let renderer = UIGraphicsImageRenderer(size: pageRect.size, format: rendererFormat)
+
+        let image = renderer.image { context in
+            UIColor.white.setFill()
+            context.fill(CGRect(origin: .zero, size: pageRect.size))
+            context.cgContext.saveGState()
+            context.cgContext.translateBy(x: 0, y: pageRect.size.height)
+            context.cgContext.scaleBy(x: 1, y: -1)
+            page.draw(with: .mediaBox, to: context.cgContext)
+            context.cgContext.restoreGState()
+        }
+
+        return image
+    }
+#endif
 
     private func extractInvoiceData(from image: UIImage) {
         isProcessing = true
@@ -378,6 +490,22 @@ extension InvoiceCaptureSheet {
         }
     }
 }
+
+#if canImport(UIKit)
+private enum PDFImportError: LocalizedError {
+    case invalidDocument
+    case unsupported
+
+    var errorDescription: String? {
+        switch self {
+        case .invalidDocument:
+            return "Unable to read the selected PDF."
+        case .unsupported:
+            return "PDF import is not supported on this device."
+        }
+    }
+}
+#endif
 
 #if canImport(UIKit)
 private struct PhotoLibraryPicker: UIViewControllerRepresentable {
@@ -437,5 +565,57 @@ private struct PhotoLibraryPicker: UIViewControllerRepresentable {
     }
 
     func updateUIViewController(_ uiViewController: UIImagePickerController, context: Context) {}
+}
+
+private struct PDFDocumentPicker: UIViewControllerRepresentable {
+    typealias UIViewControllerType = UIDocumentPickerViewController
+    let onComplete: (Result<URL, Error>) -> Void
+
+    enum PickerError: LocalizedError, Equatable {
+        case cancelled
+        case invalidSelection
+
+        var errorDescription: String? {
+            switch self {
+            case .cancelled:
+                return nil
+            case .invalidSelection:
+                return "Unable to load the selected PDF."
+            }
+        }
+    }
+
+    final class Coordinator: NSObject, UIDocumentPickerDelegate {
+        let parent: PDFDocumentPicker
+
+        init(parent: PDFDocumentPicker) {
+            self.parent = parent
+        }
+
+        func documentPickerWasCancelled(_ controller: UIDocumentPickerViewController) {
+            parent.onComplete(.failure(PickerError.cancelled))
+        }
+
+        func documentPicker(_ controller: UIDocumentPickerViewController, didPickDocumentsAt urls: [URL]) {
+            guard let url = urls.first else {
+                parent.onComplete(.failure(PickerError.invalidSelection))
+                return
+            }
+            parent.onComplete(.success(url))
+        }
+    }
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(parent: self)
+    }
+
+    func makeUIViewController(context: Context) -> UIDocumentPickerViewController {
+        let picker = UIDocumentPickerViewController(forOpeningContentTypes: [UTType.pdf], asCopy: true)
+        picker.allowsMultipleSelection = false
+        picker.delegate = context.coordinator
+        return picker
+    }
+
+    func updateUIViewController(_ uiViewController: UIDocumentPickerViewController, context: Context) {}
 }
 #endif

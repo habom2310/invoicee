@@ -4,7 +4,7 @@ import FirebaseFirestore
 #endif
 
 protocol InvoiceFirestoreUploading {
-    func upload(invoice: CapturedInvoice, imageFileName: String?, userID: String) async throws
+    func upload(invoice: CapturedInvoice, imageFileName: String?, pdfFileName: String?, userID: String) async throws
     func delete(invoiceID: UUID) async throws
     func fetchInvoices(for userID: String) async throws -> [CapturedInvoice]
 }
@@ -19,9 +19,12 @@ final class InvoiceFirestoreUploader: InvoiceFirestoreUploading {
         self.db = db
     }
 
-    func upload(invoice: CapturedInvoice, imageFileName: String?, userID: String) async throws {
+    func upload(invoice: CapturedInvoice, imageFileName: String?, pdfFileName: String?, userID: String) async throws {
         let document = db.collection("invoices").document(invoice.id.uuidString)
-        let data: [String: Any] = Self.payload(from: invoice, imageFileName: imageFileName, userID: userID)
+        let data: [String: Any] = Self.payload(from: invoice,
+                                               imageFileName: imageFileName,
+                                               pdfFileName: pdfFileName,
+                                               userID: userID)
         try await document.setData(data, merge: true)
     }
 
@@ -52,7 +55,7 @@ final class InvoiceFirestoreUploader: InvoiceFirestoreUploading {
 #else
     init() {}
 
-    func upload(invoice: CapturedInvoice, imageFileName: String?, userID: String) async throws {
+    func upload(invoice: CapturedInvoice, imageFileName: String?, pdfFileName: String?, userID: String) async throws {
         throw NSError(domain: "InvoiceFirestoreUploader", code: 0, userInfo: [NSLocalizedDescriptionKey: "FirebaseFirestore not available on this platform."])
     }
 
@@ -66,7 +69,13 @@ final class InvoiceFirestoreUploader: InvoiceFirestoreUploading {
 #endif
 
 #if canImport(FirebaseFirestore)
-    private static func payload(from invoice: CapturedInvoice, imageFileName: String?, userID: String) -> [String: Any] {
+    private static func payload(from invoice: CapturedInvoice,
+                                imageFileName: String?,
+                                pdfFileName: String?,
+                                userID: String) -> [String: Any] {
+        let resolvedPDFFileName = pdfFileName ?? invoice.remotePDFFileName
+        let hasPdf = (invoice.pdfData != nil) || (resolvedPDFFileName != nil)
+
         var payload: [String: Any] = [
             "id": invoice.id.uuidString,
             "supplier": invoice.supplier,
@@ -78,6 +87,8 @@ final class InvoiceFirestoreUploader: InvoiceFirestoreUploading {
             "category": invoice.category as Any,
             "hasImage": invoice.imageData != nil,
             "imageFileName": (imageFileName ?? invoice.remoteImageFileName) as Any,
+            "hasPdf": hasPdf,
+            "pdfFileName": resolvedPDFFileName as Any,
             "lastEdited": Timestamp(date: invoice.lastEdited),
             "userID": userID,
             "driveAccountID": userID,
@@ -147,7 +158,9 @@ final class InvoiceFirestoreUploader: InvoiceFirestoreUploading {
             category: category,
             items: items,
             imageData: nil,
+            pdfData: nil,
             remoteImageFileName: data["imageFileName"] as? String,
+            remotePDFFileName: data["pdfFileName"] as? String,
             lastEdited: lastEdited
         )
     }

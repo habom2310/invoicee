@@ -40,7 +40,8 @@ final class InvoiceRemoteSynchronizer {
             if let existing = mergedInvoices[remote.id] {
                 let hasNewerTimestamp = remote.lastEdited > existing.lastEdited
                 let hasMissingImageReference = existing.remoteImageFileName == nil && remote.remoteImageFileName != nil
-                if hasNewerTimestamp || hasMissingImageReference {
+                let hasMissingPDFReference = existing.remotePDFFileName == nil && remote.remotePDFFileName != nil
+                if hasNewerTimestamp || hasMissingImageReference || hasMissingPDFReference {
                     mergedInvoices[remote.id] = remote
                     didChange = true
                 }

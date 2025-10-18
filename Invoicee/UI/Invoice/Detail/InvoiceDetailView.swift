@@ -4,6 +4,9 @@ import UIKit
 #elseif canImport(AppKit)
 import AppKit
 #endif
+#if canImport(PDFKit)
+import PDFKit
+#endif
 
 /// Shows detailed metadata for a captured invoice with editing actions.
 struct InvoiceDetailView: View {
@@ -16,7 +19,7 @@ struct InvoiceDetailView: View {
     @State private var draft: CapturedInvoice
     @State private var newCategoryName: String = ""
     @State private var itemsExpanded: Bool = false
-    @State private var isDownloadingImage = false
+    @State private var isDownloadingAttachment = false
     @State private var downloadErrorMessage: String? = nil
     @State private var isShowingDeleteConfirmation = false
     @State private var isDeleting = false
@@ -34,6 +37,14 @@ struct InvoiceDetailView: View {
             get: { draft.items },
             set: { draft.items = $0 }
         )
+    }
+
+    private var remoteAttachmentFileName: String? {
+        draft.remotePDFFileName ?? draft.remoteImageFileName
+    }
+
+    private var remoteAttachmentIsPDF: Bool {
+        draft.remotePDFFileName != nil
     }
 
     var body: some View {
@@ -106,27 +117,27 @@ struct InvoiceDetailView: View {
 #endif
 
                     if draft.imageData == nil,
-                       draft.method == .camera,
-                       let remoteFileName = draft.remoteImageFileName {
+                       let remoteFileName = remoteAttachmentFileName {
                         VStack(alignment: .leading, spacing: 8) {
-                            InvoiceFieldLabel("Captured Image")
+                            InvoiceFieldLabel(remoteAttachmentIsPDF ? "Invoice PDF" : "Captured Image")
                             Button {
-                                downloadRemoteImage(named: remoteFileName)
+                                downloadRemoteAttachment(named: remoteFileName, isPDF: remoteAttachmentIsPDF)
                             } label: {
-                                if isDownloadingImage {
+                                if isDownloadingAttachment {
                                     ProgressView()
                                         .progressViewStyle(.circular)
                                         .frame(maxWidth: .infinity)
                                 } else {
-                                    Label("Download from Google Drive", systemImage: "arrow.down.circle")
+                                    Label(remoteAttachmentIsPDF ? "Download PDF from Google Drive" : "Download from Google Drive",
+                                          systemImage: remoteAttachmentIsPDF ? "arrow.down.doc" : "arrow.down.circle")
                                         .frame(maxWidth: .infinity)
                                 }
                             }
                             .buttonStyle(.borderedProminent)
-                            .disabled(isDownloadingImage || driveConnector.state != .linked || isDeleting)
+                            .disabled(isDownloadingAttachment || driveConnector.state != .linked || isDeleting)
 
-                            if driveConnector.state != .linked && !isDownloadingImage {
-                                Text("Link Google Drive to download the original image.")
+                            if driveConnector.state != .linked && !isDownloadingAttachment {
+                                Text("Link Google Drive to download the original file.")
                                     .font(.footnote)
                                     .foregroundStyle(.secondary)
                             }
@@ -239,32 +250,134 @@ struct InvoiceDetailView: View {
         dismiss()
     }
 
-    private func downloadRemoteImage(named fileName: String) {
-        guard !isDownloadingImage else { return }
+    private func downloadRemoteAttachment(named fileName: String, isPDF: Bool) {
+        guard !isDownloadingAttachment else { return }
         guard !isDeleting else { return }
         guard driveConnector.state == .linked else {
             downloadErrorMessage = "Google Drive is not linked."
             return
         }
 
-        isDownloadingImage = true
+        isDownloadingAttachment = true
         downloadErrorMessage = nil
 
         Task {
             do {
                 let data = try await driveConnector.transferService.downloadInvoiceImage(fileName: fileName, invoiceDate: draft.date)
+                let previewData: Data
+                if isPDF {
+#if canImport(PDFKit)
+                    previewData = try renderPreviewImageData(fromPDF: data)
+#else
+                    throw AttachmentConversionError.pdfUnsupported
+#endif
+                } else {
+                    previewData = data
+                }
+
                 await MainActor.run {
-                    draft.imageData = data
-                    draft.remoteImageFileName = fileName
-                    invoice.imageData = data
-                    invoice.remoteImageFileName = fileName
-                    isDownloadingImage = false
+                    if isPDF {
+                        draft.pdfData = data
+                        draft.remotePDFFileName = fileName
+                        invoice.pdfData = data
+                        invoice.remotePDFFileName = fileName
+                        draft.remoteImageFileName = nil
+                        invoice.remoteImageFileName = nil
+                    } else {
+                        draft.pdfData = nil
+                        invoice.pdfData = nil
+                        draft.remotePDFFileName = nil
+                        invoice.remotePDFFileName = nil
+                        draft.remoteImageFileName = fileName
+                        invoice.remoteImageFileName = fileName
+                    }
+                    draft.imageData = previewData
+                    invoice.imageData = previewData
+                    isDownloadingAttachment = false
                 }
             } catch {
                 await MainActor.run {
-                    downloadErrorMessage = error.localizedDescription
-                    isDownloadingImage = false
+                    downloadErrorMessage = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+                    isDownloadingAttachment = false
                 }
+            }
+        }
+    }
+
+#if canImport(PDFKit)
+    private func renderPreviewImageData(fromPDF data: Data) throws -> Data {
+#if canImport(UIKit)
+        guard let document = PDFDocument(data: data),
+              let page = document.page(at: 0) else {
+            throw AttachmentConversionError.invalidPDF
+        }
+
+        let pageRect = page.bounds(for: .mediaBox)
+        let rendererFormat = UIGraphicsImageRendererFormat()
+        rendererFormat.scale = UIScreen.main.scale * 2
+        rendererFormat.opaque = true
+        let renderer = UIGraphicsImageRenderer(size: pageRect.size, format: rendererFormat)
+
+        let image = renderer.image { context in
+            UIColor.white.setFill()
+            context.fill(CGRect(origin: .zero, size: pageRect.size))
+            context.cgContext.saveGState()
+            context.cgContext.translateBy(x: 0, y: pageRect.size.height)
+            context.cgContext.scaleBy(x: 1, y: -1)
+            page.draw(with: .mediaBox, to: context.cgContext)
+            context.cgContext.restoreGState()
+        }
+
+        guard let jpeg = image.jpegData(compressionQuality: 0.85) else {
+            throw AttachmentConversionError.renderFailed
+        }
+        return jpeg
+#elseif canImport(AppKit)
+        guard let document = PDFDocument(data: data),
+              let page = document.page(at: 0) else {
+            throw AttachmentConversionError.invalidPDF
+        }
+
+        let pageRect = page.bounds(for: .mediaBox)
+        let image = NSImage(size: pageRect.size)
+        image.lockFocus()
+        guard let context = NSGraphicsContext.current?.cgContext else {
+            image.unlockFocus()
+            throw AttachmentConversionError.renderFailed
+        }
+
+        context.saveGState()
+        context.translateBy(x: 0, y: pageRect.size.height)
+        context.scaleBy(x: 1, y: -1)
+        page.draw(with: .mediaBox, to: context)
+        context.restoreGState()
+        image.unlockFocus()
+
+        guard let tiff = image.tiffRepresentation,
+              let bitmap = NSBitmapImageRep(data: tiff),
+              let jpeg = bitmap.representation(using: .jpeg, properties: [.compressionFactor: 0.85]) else {
+            throw AttachmentConversionError.renderFailed
+        }
+        return jpeg
+#else
+        throw AttachmentConversionError.pdfUnsupported
+#endif
+    }
+#endif
+
+    private enum AttachmentConversionError: LocalizedError {
+        case invalidPDF
+        case renderFailed
+        case pdfUnsupported
+
+        var errorDescription: String? {
+            switch self {
+            case .invalidPDF:
+                return "Unable to read the downloaded PDF."
+            case .renderFailed:
+                return "Unable to render a preview for the PDF."
+            case .pdfUnsupported:
+                return "PDF preview is not supported on this device."
             }
         }
     }
@@ -276,24 +389,38 @@ struct InvoiceDetailView: View {
         }
 
         let invoiceToDelete = await MainActor.run { invoice }
-        var remoteFileName = await MainActor.run { invoice.remoteImageFileName }
+        var remoteImageFileName = await MainActor.run { invoice.remoteImageFileName }
+        var remotePDFFileName = await MainActor.run { invoice.remotePDFFileName }
         let invoiceDate = invoiceToDelete.date
         let tracker = appEnvironment.syncTracker
-        if remoteFileName == nil {
-            if let path = await tracker.record(for: invoiceToDelete.id)?.imagePath {
-                remoteFileName = path.split(separator: "/").last.map(String.init)
-            }
+        let trackerRecord = await tracker.record(for: invoiceToDelete.id)
+        if remoteImageFileName == nil,
+           let path = trackerRecord?.imagePath {
+            remoteImageFileName = path.split(separator: "/").last.map(String.init)
+        }
+        if remotePDFFileName == nil,
+           let path = trackerRecord?.pdfPath {
+            remotePDFFileName = path.split(separator: "/").last.map(String.init)
         }
 
         do {
             let driveState = await MainActor.run { driveConnector.state }
 
-            if let remoteFileName, !remoteFileName.isEmpty, driveState != .linked {
+            let requiresDrive = [remoteImageFileName, remotePDFFileName]
+                .compactMap { $0 }
+                .contains { !$0.isEmpty }
+
+            if requiresDrive, driveState != .linked {
                 throw InvoiceDeletionError.driveNotLinked
             }
 
-            if let remoteFileName, !remoteFileName.isEmpty, driveState == .linked {
-                try await driveConnector.transferService.deleteInvoiceImage(fileName: remoteFileName, invoiceDate: invoiceDate)
+            if driveState == .linked {
+                if let remoteImageFileName, !remoteImageFileName.isEmpty {
+                    try await driveConnector.transferService.deleteInvoiceImage(fileName: remoteImageFileName, invoiceDate: invoiceDate)
+                }
+                if let remotePDFFileName, !remotePDFFileName.isEmpty {
+                    try await driveConnector.transferService.deleteInvoiceImage(fileName: remotePDFFileName, invoiceDate: invoiceDate)
+                }
             }
 
             try await appEnvironment.firestoreUploader.delete(invoiceID: invoiceToDelete.id)

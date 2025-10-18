@@ -32,7 +32,9 @@ struct CapturedInvoice: Identifiable, Codable, Equatable {
     var category: String?
     var items: [ManualInvoiceItem]
     var imageData: Data?
+    var pdfData: Data?
     var remoteImageFileName: String?
+    var remotePDFFileName: String?
     var lastEdited: Date = .now
 
     var formattedDate: String {

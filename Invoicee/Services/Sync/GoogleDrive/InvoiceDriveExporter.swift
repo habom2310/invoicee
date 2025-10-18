@@ -20,6 +20,17 @@ enum InvoiceDriveExporter {
         return url
     }
 
+    static func exportInvoicePDF(_ invoice: CapturedInvoice,
+                                 metadata: DriveUploadMetadata) throws -> URL? {
+        guard let pdfData = invoice.pdfData else { return nil }
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent(metadata.fileName)
+        if FileManager.default.fileExists(atPath: url.path) {
+            try FileManager.default.removeItem(at: url)
+        }
+        try pdfData.write(to: url, options: .atomic)
+        return url
+    }
+
     private static func resizedImageDataIfNeeded(from data: Data, quality: InvoiceImageQuality) -> Data? {
         guard let longestSide = quality.targetLongestSide else { return nil }
 #if canImport(UIKit)

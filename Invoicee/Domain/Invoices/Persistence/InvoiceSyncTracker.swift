@@ -5,6 +5,7 @@ actor InvoiceSyncTracker: InvoiceSyncStatusProvider {
     struct Record: Codable {
         let lastEdited: Date
         let imagePath: String?
+        let pdfPath: String?
     }
 
     private let storageKey: String
@@ -36,8 +37,8 @@ actor InvoiceSyncTracker: InvoiceSyncStatusProvider {
         return record.lastEdited >= invoice.lastEdited
     }
 
-    func markSynced(invoice: CapturedInvoice, imagePath: String?) {
-        records[invoice.id] = Record(lastEdited: invoice.lastEdited, imagePath: imagePath)
+    func markSynced(invoice: CapturedInvoice, imagePath: String?, pdfPath: String? = nil) {
+        records[invoice.id] = Record(lastEdited: invoice.lastEdited, imagePath: imagePath, pdfPath: pdfPath)
         persist()
     }
 
@@ -49,10 +50,16 @@ actor InvoiceSyncTracker: InvoiceSyncStatusProvider {
     func highestIncrementLookup() -> [String: Int] {
         var lookup: [String: Int] = [:]
         for record in records.values {
-            guard let path = record.imagePath,
-                  let parsed = parseImagePath(path) else { continue }
-            let current = lookup[parsed.baseName] ?? 0
-            lookup[parsed.baseName] = max(current, parsed.increment)
+            if let path = record.imagePath,
+               let parsed = parseAttachmentPath(path) {
+                let current = lookup[parsed.baseName] ?? 0
+                lookup[parsed.baseName] = max(current, parsed.increment)
+            }
+            if let path = record.pdfPath,
+               let parsed = parseAttachmentPath(path) {
+                let current = lookup[parsed.baseName] ?? 0
+                lookup[parsed.baseName] = max(current, parsed.increment)
+            }
         }
         return lookup
     }
@@ -84,7 +91,7 @@ actor InvoiceSyncTracker: InvoiceSyncStatusProvider {
         }
     }
 
-    private func parseImagePath(_ path: String) -> DriveUploadMetadata.ParsedFileName? {
+    private func parseAttachmentPath(_ path: String) -> DriveUploadMetadata.ParsedFileName? {
         let fileNameWithExtension = path.split(separator: "/").last.map(String.init) ?? path
         let fileName: String
         if let dotIndex = fileNameWithExtension.lastIndex(of: ".") {
