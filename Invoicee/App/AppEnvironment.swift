@@ -13,6 +13,7 @@ final class AppEnvironment: ObservableObject {
     let remoteSynchronizer: InvoiceRemoteSynchronizer
     let syncTracker: InvoiceSyncTracker
     let categoryStore: InvoiceCategoryStore
+    private var cancellables: Set<AnyCancellable> = []
 
     init(reportingPeriodStore: ReportingPeriodStore,
          invoiceArchive: InvoiceArchive,
@@ -28,6 +29,14 @@ final class AppEnvironment: ObservableObject {
         self.remoteSynchronizer = remoteSynchronizer
         self.syncTracker = syncTracker
         self.categoryStore = categoryStore
+
+        categoryStore.updateCategories(from: invoiceArchive.invoices)
+        invoiceArchive.$invoices
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] invoices in
+                self?.categoryStore.updateCategories(from: invoices)
+            }
+            .store(in: &cancellables)
     }
 
     func makeDriveLinkViewModel() -> GoogleDriveLinkViewModel {
@@ -72,12 +81,13 @@ final class AppEnvironment: ObservableObject {
             _ = try? await synchronizer.synchronizeFromRemote()
         }
         let categoryStore = InvoiceCategoryStore()
-        return AppEnvironment(reportingPeriodStore: reportingPeriodStore,
-                              invoiceArchive: invoiceArchive,
-                              driveConnector: connector,
-                              firestoreUploader: firestoreUploader,
-                              remoteSynchronizer: remoteSynchronizer,
-                              syncTracker: syncTracker,
-                              categoryStore: categoryStore)
+        let environment = AppEnvironment(reportingPeriodStore: reportingPeriodStore,
+                                         invoiceArchive: invoiceArchive,
+                                         driveConnector: connector,
+                                         firestoreUploader: firestoreUploader,
+                                         remoteSynchronizer: remoteSynchronizer,
+                                         syncTracker: syncTracker,
+                                         categoryStore: categoryStore)
+        return environment
     }
 }

@@ -7,17 +7,12 @@ final class InvoiceCategoryStore: ObservableObject {
     @Published private(set) var supplierCategories: [String: String]
 
     private let userDefaults: UserDefaults
-    private let storageKey = "invoiceCategories"
     private let supplierCategoryStorageKey = "invoiceSupplierCategories"
 
     init(userDefaults: UserDefaults = .standard) {
         self.userDefaults = userDefaults
 
-        if let saved = userDefaults.array(forKey: storageKey) as? [String] {
-            categories = saved
-        } else {
-            categories = []
-        }
+        categories = []
 
         if let savedMap = userDefaults.dictionary(forKey: supplierCategoryStorageKey) as? [String: String] {
             supplierCategories = savedMap
@@ -32,7 +27,7 @@ final class InvoiceCategoryStore: ObservableObject {
 
         if !categories.contains(where: { $0.caseInsensitiveCompare(trimmed) == .orderedSame }) {
             categories.append(trimmed)
-            saveCategories()
+            sortCategories()
         }
     }
 
@@ -67,11 +62,24 @@ final class InvoiceCategoryStore: ObservableObject {
         return trimmed.lowercased()
     }
 
-    private func saveCategories() {
-        userDefaults.set(categories, forKey: storageKey)
-    }
-
     private func saveSupplierCategories() {
         userDefaults.set(supplierCategories, forKey: supplierCategoryStorageKey)
+    }
+
+    private func sortCategories() {
+        categories.sort { $0.localizedCaseInsensitiveCompare($1) == .orderedAscending }
+    }
+
+    func updateCategories(from invoices: [CapturedInvoice]) {
+        var derived: [String] = []
+        for invoice in invoices {
+            guard let category = invoice.category?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  !category.isEmpty else { continue }
+            if !derived.contains(where: { $0.caseInsensitiveCompare(category) == .orderedSame }) {
+                derived.append(category)
+            }
+        }
+
+        categories = derived.sorted { $0.localizedCaseInsensitiveCompare($1) == .orderedAscending }
     }
 }
