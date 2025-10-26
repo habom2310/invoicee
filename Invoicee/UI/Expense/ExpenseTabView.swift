@@ -89,8 +89,14 @@ struct ExpenseTabView: View {
 
             Section("\(viewModel.selectedMetric.displayName) for \(viewModel.selectedPeriodDescription)") {
                 VStack(alignment: .leading, spacing: 8) {
-                    Text(viewModel.totalFormatted)
-                        .font(.system(size: 34, weight: .bold, design: .rounded))
+                    HStack(alignment: .firstTextBaseline) {
+                        Text(viewModel.totalFormatted)
+                            .font(.system(size: 34, weight: .bold, design: .rounded))
+                        Spacer()
+                        Text("\(viewModel.totalGSTFormatted) GST")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                    }
                     Text(viewModel.selectedPeriodDescription)
                         .font(.subheadline)
                         .foregroundStyle(.secondary)

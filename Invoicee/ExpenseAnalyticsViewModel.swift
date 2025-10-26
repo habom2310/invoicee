@@ -141,6 +141,14 @@ final class ExpenseAnalyticsViewModel: ObservableObject {
         totalForSelection.formattedCurrency()
     }
 
+    var totalGSTForSelection: Decimal {
+        filteredInvoices.reduce(.zero) { $0 + $1.gst }
+    }
+
+    var totalGSTFormatted: String {
+        totalGSTForSelection.formattedCurrency()
+    }
+
     /// Aggregated totals grouped by invoice category for the selected month.
     var categoryTotals: [CategoryTotal] {
         let grouped = Dictionary(grouping: filteredInvoices) { invoice -> String in

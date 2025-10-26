@@ -6,9 +6,12 @@ enum GSTValidator {
 
     static func sanitizedAmount(for gst: Decimal?, total: Decimal?) -> Decimal? {
         guard let gst else { return nil }
-        guard let total, total > 0 else { return gst }
+        let zero: Decimal = 0
+        let normalizedGST = max(gst, zero)
+
+        guard let total, total > 0 else { return normalizedGST }
 
         let maximumAllowed = total * maximumPercentage
-        return gst >= maximumAllowed ? nil : gst
+        return normalizedGST > maximumAllowed ? maximumAllowed : normalizedGST
     }
 }
