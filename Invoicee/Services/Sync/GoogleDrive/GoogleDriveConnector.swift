@@ -46,6 +46,7 @@ final class GoogleDriveConnector: NSObject, ObservableObject, InvoiceAutoSyncSch
     private var removeInvoices: ([UUID]) -> Void
     private var remoteFetcher: (() async -> Void)?
     private var registerSyncedInvoices: ([UUID]) -> Void
+    private var hasValidatedDriveSession = false
     private var autoSyncTask: Task<Void, Never>? = nil
 
     private var unsyncedInvoiceIDs: Set<UUID> = []
@@ -66,6 +67,7 @@ final class GoogleDriveConnector: NSObject, ObservableObject, InvoiceAutoSyncSch
         state = transferService.currentAuthorizationState()
         accountDisplayName = transferService.currentAccountName
         linkIssueMessage = nil
+        hasValidatedDriveSession = false
         super.init()
         DriveConnectorLog.debug("Connector initialised. State: \(state)")
         Task(priority: .background) {
@@ -125,15 +127,19 @@ final class GoogleDriveConnector: NSObject, ObservableObject, InvoiceAutoSyncSch
             state = .linked
             accountDisplayName = transferService.currentAccountName
             linkIssueMessage = nil
+            hasValidatedDriveSession = true
             DriveConnectorLog.info("Google Drive linked for \(accountDisplayName ?? transferService.currentUserID ?? "unknown user").")
             await refreshUnsyncedState()
             syncStatusRefresh()
             await remoteFetcher?()
+            await refreshUnsyncedState()
+            syncStatusRefresh()
         } catch {
             state = .failed
             linkIssueMessage = (transferService as? GoogleDriveTransferService)?.lastErrorDescription ??
             (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
             DriveConnectorLog.error("Google Drive link failed: \(linkIssueMessage ?? error.localizedDescription)")
+            hasValidatedDriveSession = false
             unsyncedInvoiceIDs.removeAll()
             hasUnsyncedInvoices = false
             lastSyncSummary = nil
@@ -185,34 +191,41 @@ final class GoogleDriveConnector: NSObject, ObservableObject, InvoiceAutoSyncSch
 
     /// Records that invoices changed; recalculates unsynced set.
     func enqueueAutoSync(with invoices: [CapturedInvoice]) {
-        Task { await refreshUnsyncedState(for: invoices) }
+        Task { @MainActor in
+            await refreshUnsyncedState(for: invoices)
 
-        guard state == .linked, !invoices.isEmpty else { return }
+            autoSyncTask?.cancel()
+            autoSyncTask = nil
 
-        autoSyncTask?.cancel()
-        autoSyncTask = Task(priority: .background) {
-            let qualityRaw = UserDefaults.standard.string(forKey: Self.imageQualityPreferenceKey) ?? InvoiceImageQuality.large.rawValue
-            let quality = InvoiceImageQuality(rawValue: qualityRaw) ?? .large
+            guard hasValidatedDriveSession,
+                  state == .linked,
+                  !invoices.isEmpty,
+                  !unsyncedInvoiceIDs.isEmpty else { return }
 
-            var delay: UInt64 = 1_000_000_000
-            let maximumDelay: UInt64 = 60_000_000_000
+            autoSyncTask = Task(priority: .background) {
+                let qualityRaw = UserDefaults.standard.string(forKey: Self.imageQualityPreferenceKey) ?? InvoiceImageQuality.large.rawValue
+                let quality = InvoiceImageQuality(rawValue: qualityRaw) ?? .large
 
-            while !Task.isCancelled {
-                try? await Task.sleep(nanoseconds: delay)
-                guard !Task.isCancelled else { return }
-                guard self.state == .linked else { return }
+                var delay: UInt64 = 1_000_000_000
+                let maximumDelay: UInt64 = 60_000_000_000
 
-                do {
-                    _ = try await self.syncNow(quality: quality)
-                    await MainActor.run { self.syncStatusRefresh() }
-                    return
-                } catch {
-                    if let syncError = error as? GoogleDriveSyncCoordinator.SyncError,
-                       case .missingUserIdentity = syncError {
+                while !Task.isCancelled {
+                    try? await Task.sleep(nanoseconds: delay)
+                    guard !Task.isCancelled else { return }
+                    guard await MainActor.run(body: { self.state == .linked && self.hasValidatedDriveSession }) else { return }
+
+                    do {
+                        _ = try await self.syncNow(quality: quality)
+                        await MainActor.run { self.syncStatusRefresh() }
                         return
+                    } catch {
+                        if let syncError = error as? GoogleDriveSyncCoordinator.SyncError,
+                           case .missingUserIdentity = syncError {
+                            return
+                        }
+                        DriveConnectorLog.error("Auto-sync attempt failed: \(error.localizedDescription). Retrying with backoff.")
+                        delay = min(delay * 2, maximumDelay)
                     }
-                    DriveConnectorLog.error("Auto-sync attempt failed: \(error.localizedDescription). Retrying with backoff.")
-                    delay = min(delay * 2, maximumDelay)
                 }
             }
         }
@@ -252,6 +265,7 @@ private extension GoogleDriveConnector {
         hasUnsyncedInvoices = false
         unsyncedInvoiceIDs.removeAll()
         lastSyncSummary = nil
+        hasValidatedDriveSession = false
         syncStatusRefresh()
     }
 
@@ -261,11 +275,15 @@ private extension GoogleDriveConnector {
         applyHealthCheckResult(result)
 
         if result == .linked {
+            hasValidatedDriveSession = true
             await refreshUnsyncedState()
             syncStatusRefresh()
             await remoteFetcher?()
+            await refreshUnsyncedState()
+            syncStatusRefresh()
             await scheduleInitialSync()
         } else {
+            hasValidatedDriveSession = false
             await tracker.reset()
         }
     }
@@ -276,6 +294,7 @@ private extension GoogleDriveConnector {
         case .linked:
             accountDisplayName = transferService.currentAccountName
             linkIssueMessage = nil
+            hasValidatedDriveSession = true
             DriveConnectorLog.info("Session restored for \(accountDisplayName ?? transferService.currentUserID ?? "unknown user").")
         case .signedOut:
             accountDisplayName = nil
@@ -286,6 +305,7 @@ private extension GoogleDriveConnector {
             unsyncedInvoiceIDs.removeAll()
             hasUnsyncedInvoices = false
             lastSyncSummary = nil
+            hasValidatedDriveSession = false
         case .failed:
             accountDisplayName = nil
             let message = (transferService as? GoogleDriveTransferService)?.lastErrorDescription ??
@@ -295,6 +315,7 @@ private extension GoogleDriveConnector {
             unsyncedInvoiceIDs.removeAll()
             hasUnsyncedInvoices = false
             lastSyncSummary = nil
+            hasValidatedDriveSession = false
         case .authorizing:
             break
         }
@@ -310,7 +331,9 @@ private extension GoogleDriveConnector {
     }
 
     func scheduleInitialSync() async {
-        guard state == .linked else { return }
+        guard hasValidatedDriveSession,
+              state == .linked,
+              !unsyncedInvoiceIDs.isEmpty else { return }
         let qualityRaw = UserDefaults.standard.string(forKey: Self.imageQualityPreferenceKey) ?? InvoiceImageQuality.large.rawValue
         let quality = InvoiceImageQuality(rawValue: qualityRaw) ?? .large
         let invoices = invoicesProvider()

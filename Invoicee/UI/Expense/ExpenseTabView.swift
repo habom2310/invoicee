@@ -7,6 +7,7 @@ struct ExpenseTabView: View {
     init(viewModel: @autoclosure @escaping () -> ExpenseAnalyticsViewModel) {
         _viewModel = StateObject(wrappedValue: viewModel())
     }
+    private static let breakdownLimit = 10
     @State private var isShowingMonthPicker = false
     @State private var comparisonContext: ExpenseComparisonContext? = nil
 
@@ -109,9 +110,10 @@ struct ExpenseTabView: View {
                     Button {
                         openComparison()
                     } label: {
-                        ExpenseCategoryBarChart(totals: viewModel.categoryTotals,
-                                                 metric: viewModel.selectedMetric)
-                            .frame(height: CGFloat(viewModel.categoryTotals.count) * 28 + 40)
+                        ExpenseCategoryBarChart(totals: limitedCategoryTotals,
+                                                 metric: viewModel.selectedMetric,
+                                                 overallTotal: viewModel.totalForSelection)
+                            .frame(height: CGFloat(limitedCategoryTotals.count) * 28 + 40)
                             .padding(.vertical, 4)
                     }
                     .buttonStyle(.plain)
@@ -123,9 +125,10 @@ struct ExpenseTabView: View {
                     Text("Supplier totals are unavailable for \(viewModel.selectedPeriodDescription.lowercased()).")
                         .foregroundStyle(.secondary)
                 } else {
-                    ExpenseSupplierBarChart(totals: viewModel.supplierTotals,
-                                            metric: viewModel.selectedMetric)
-                        .frame(height: CGFloat(viewModel.supplierTotals.count) * 28 + 40)
+                    ExpenseSupplierBarChart(totals: limitedSupplierTotals,
+                                            metric: viewModel.selectedMetric,
+                                            overallTotal: viewModel.totalForSelection)
+                        .frame(height: CGFloat(limitedSupplierTotals.count) * 28 + 40)
                         .padding(.vertical, 4)
                 }
             }
@@ -197,6 +200,14 @@ struct ExpenseTabView: View {
             }
             .presentationDetents([.height(320), .medium])
         }
+    }
+
+    private var limitedCategoryTotals: [ExpenseAnalyticsViewModel.CategoryTotal] {
+        Array(viewModel.categoryTotals.prefix(Self.breakdownLimit))
+    }
+
+    private var limitedSupplierTotals: [ExpenseAnalyticsViewModel.SupplierTotal] {
+        Array(viewModel.supplierTotals.prefix(Self.breakdownLimit))
     }
 
     private var emptyState: some View {

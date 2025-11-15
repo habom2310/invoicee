@@ -4,6 +4,7 @@ import SwiftUI
 struct ExpenseSupplierBarChart: View {
     let totals: [ExpenseAnalyticsViewModel.SupplierTotal]
     let metric: ExpenseAnalyticsViewModel.Metric
+    let overallTotal: Decimal
 
     private var maxValue: Decimal {
         totals.map { $0.total }.max() ?? 0
@@ -28,10 +29,10 @@ struct ExpenseSupplierBarChart: View {
                     }
                     .frame(height: 16)
 
-                    Text(total.total.formattedCurrency())
+                    Text("\(total.total.formattedCurrency()) (\(percentageText(for: total.total)))")
                         .font(.footnote)
                         .foregroundStyle(.secondary)
-                        .frame(width: 90, alignment: .trailing)
+                        .frame(width: 150, alignment: .trailing)
                 }
             }
         }
@@ -48,5 +49,11 @@ struct ExpenseSupplierBarChart: View {
         guard maxValue > 0 else { return 0 }
         let ratio = min((value as NSDecimalNumber).doubleValue / (maxValue as NSDecimalNumber).doubleValue, 1)
         return max(CGFloat(ratio) * fullWidth, 4)
+    }
+
+    private func percentageText(for value: Decimal) -> String {
+        guard overallTotal > 0 else { return "0%" }
+        let ratio = max(min((value as NSDecimalNumber).doubleValue / (overallTotal as NSDecimalNumber).doubleValue, 1), 0)
+        return ratio.formatted(.percent.precision(.fractionLength(0...1)))
     }
 }

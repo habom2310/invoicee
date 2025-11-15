@@ -81,12 +81,13 @@ actor InvoiceSyncTracker: InvoiceSyncStatusProvider {
 
     private func persist() {
         let stringKeyed = Dictionary(uniqueKeysWithValues: records.map { ($0.key.uuidString, $0.value) })
-        let defaults = userDefaults
-        Task { @MainActor [defaults] in
-            if let data = try? JSONEncoder().encode(stringKeyed) {
-                defaults.set(data, forKey: storageKey)
+        let encoded = try? JSONEncoder().encode(stringKeyed)
+
+        Task { @MainActor in
+            if let data = encoded {
+                userDefaults.set(data, forKey: storageKey)
             } else {
-                defaults.removeObject(forKey: storageKey)
+                userDefaults.removeObject(forKey: storageKey)
             }
         }
     }

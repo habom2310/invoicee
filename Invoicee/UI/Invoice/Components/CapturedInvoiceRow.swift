@@ -7,7 +7,7 @@ struct CapturedInvoiceRow: View {
 
     var body: some View {
         HStack(alignment: .top, spacing: 12) {
-            Image(systemName: isSynced ? "cloud.fill" : "cloud.slash")
+            Image(systemName: isSynced ? "icloud.fill" : "icloud.slash")
                 .foregroundStyle(isSynced ? .blue : .secondary)
                 .font(.title2)
                 .padding(.top, 2)
