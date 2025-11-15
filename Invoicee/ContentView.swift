@@ -5,7 +5,7 @@
 //  Created by Ha Nguyen on 3/10/2025.
 //
 
-import SwiftUI
+internal import SwiftUI
 
 struct ContentView: View {
     @EnvironmentObject private var appEnvironment: AppEnvironment
@@ -21,6 +21,12 @@ struct ContentView: View {
                                                                  periodStore: appEnvironment.reportingPeriodStore))
                 .tabItem {
                     Label("Expense", systemImage: "chart.pie")
+                }
+
+            RevenueTabView(viewModel: RevenueViewModel(store: appEnvironment.revenueStore,
+                                                       driveConnector: appEnvironment.driveConnector))
+                .tabItem {
+                    Label("Revenue", systemImage: "dollarsign.arrow.circlepath")
                 }
 
             ProfileTabView(viewModel: appEnvironment.makeDriveLinkViewModel())

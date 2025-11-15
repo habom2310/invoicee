@@ -1,4 +1,4 @@
-import SwiftUI
+internal import SwiftUI
 
 /// Filters binding updates to numeric characters, optionally permitting a decimal separator.
 extension Binding where Value == String {

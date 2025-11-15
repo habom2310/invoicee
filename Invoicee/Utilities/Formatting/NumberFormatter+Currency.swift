@@ -9,4 +9,13 @@ extension NumberFormatter {
         formatter.minimumFractionDigits = 2
         return formatter
     }()
+
+    /// Currency formatter without the leading symbol, useful for editing states.
+    static let invoiceCurrencyPlain: NumberFormatter = {
+        let formatter = NumberFormatter()
+        formatter.numberStyle = .decimal
+        formatter.maximumFractionDigits = 2
+        formatter.minimumFractionDigits = 0
+        return formatter
+    }()
 }

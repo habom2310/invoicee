@@ -1,6 +1,6 @@
 import Foundation
 #if canImport(SwiftUI)
-import SwiftUI
+internal import SwiftUI
 #endif
 #if canImport(Vision)
 import Vision

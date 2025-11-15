@@ -1,4 +1,4 @@
-import SwiftUI
+internal import SwiftUI
 import UniformTypeIdentifiers
 
 #if canImport(UIKit)

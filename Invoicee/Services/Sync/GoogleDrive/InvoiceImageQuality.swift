@@ -1,5 +1,5 @@
 import Foundation
-import SwiftUI
+internal import SwiftUI
 
 /// Configures how invoice images are resized prior to upload.
 enum InvoiceImageQuality: String, CaseIterable, Identifiable {

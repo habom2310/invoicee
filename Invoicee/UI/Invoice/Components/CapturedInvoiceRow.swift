@@ -1,4 +1,4 @@
-import SwiftUI
+internal import SwiftUI
 
 /// Displays a single invoice summary inside the list.
 struct CapturedInvoiceRow: View {

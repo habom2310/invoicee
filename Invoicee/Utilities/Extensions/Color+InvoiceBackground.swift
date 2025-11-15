@@ -1,4 +1,4 @@
-import SwiftUI
+internal import SwiftUI
 
 /// Provides a consistent background colour for grouped invoice lists.
 extension Color {

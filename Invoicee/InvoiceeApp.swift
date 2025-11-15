@@ -5,7 +5,7 @@
 //  Created by Ha Nguyen on 3/10/2025.
 //
 
-import SwiftUI
+internal import SwiftUI
 #if canImport(FirebaseCore)
 import FirebaseCore
 #endif

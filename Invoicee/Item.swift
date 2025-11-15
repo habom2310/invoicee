@@ -1,4 +1,4 @@
-import SwiftUI
+internal import SwiftUI
 
 struct InvoiceFieldLabel: View {
     var text: String

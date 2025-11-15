@@ -5,8 +5,9 @@ extension Decimal {
         self.init(string: string, locale: Locale(identifier: "en_US_POSIX"))
     }
 
-    func formattedCurrency() -> String {
-        NumberFormatter.invoiceCurrency.string(from: NSDecimalNumber(decimal: self)) ?? ""
+    func formattedCurrency(omitSymbol: Bool = false) -> String {
+        let formatter = omitSymbol ? NumberFormatter.invoiceCurrencyPlain : NumberFormatter.invoiceCurrency
+        return formatter.string(from: NSDecimalNumber(decimal: self)) ?? ""
     }
 
     var plainString: String {

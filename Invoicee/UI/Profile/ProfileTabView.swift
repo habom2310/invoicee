@@ -1,4 +1,4 @@
-import SwiftUI
+internal import SwiftUI
 
 /// Hosts account preferences and Google Drive linking flows.
 struct ProfileTabView: View {

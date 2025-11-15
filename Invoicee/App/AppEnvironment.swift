@@ -1,5 +1,5 @@
 import Foundation
-import SwiftUI
+internal import SwiftUI
 import Combine
 
 /// Centralises dependency wiring for the Invoicee app.
@@ -13,6 +13,7 @@ final class AppEnvironment: ObservableObject {
     let remoteSynchronizer: InvoiceRemoteSynchronizer
     let syncTracker: InvoiceSyncTracker
     let categoryStore: InvoiceCategoryStore
+    let revenueStore: RevenueStoring
     private var cancellables: Set<AnyCancellable> = []
 
     init(reportingPeriodStore: ReportingPeriodStore,
@@ -21,7 +22,8 @@ final class AppEnvironment: ObservableObject {
          firestoreUploader: InvoiceFirestoreUploading,
          remoteSynchronizer: InvoiceRemoteSynchronizer,
          syncTracker: InvoiceSyncTracker,
-         categoryStore: InvoiceCategoryStore) {
+         categoryStore: InvoiceCategoryStore,
+         revenueStore: RevenueStoring) {
         self.reportingPeriodStore = reportingPeriodStore
         self.invoiceArchive = invoiceArchive
         self.driveConnector = driveConnector
@@ -29,6 +31,7 @@ final class AppEnvironment: ObservableObject {
         self.remoteSynchronizer = remoteSynchronizer
         self.syncTracker = syncTracker
         self.categoryStore = categoryStore
+        self.revenueStore = revenueStore
 
         categoryStore.updateCategories(from: invoiceArchive.invoices)
         invoiceArchive.$invoices
@@ -81,13 +84,15 @@ final class AppEnvironment: ObservableObject {
             _ = try? await synchronizer.synchronizeFromRemote()
         }
         let categoryStore = InvoiceCategoryStore()
+        let revenueStore = RevenueFirestoreStore()
         let environment = AppEnvironment(reportingPeriodStore: reportingPeriodStore,
                                          invoiceArchive: invoiceArchive,
                                          driveConnector: connector,
                                          firestoreUploader: firestoreUploader,
                                          remoteSynchronizer: remoteSynchronizer,
                                          syncTracker: syncTracker,
-                                         categoryStore: categoryStore)
+                                         categoryStore: categoryStore,
+                                         revenueStore: revenueStore)
         return environment
     }
 }

@@ -1,4 +1,4 @@
-import SwiftUI
+internal import SwiftUI
 
 /// Horizontal bar chart breaking down totals by supplier.
 struct ExpenseSupplierBarChart: View {

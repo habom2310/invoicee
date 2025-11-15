@@ -1,4 +1,4 @@
-import SwiftUI
+internal import SwiftUI
 
 /// Summarises expenses and charts trends over time.
 struct ExpenseTabView: View {
