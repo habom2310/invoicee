@@ -1,7 +1,9 @@
 internal import SwiftUI
+import UniformTypeIdentifiers
 
 /// Summarises expenses and charts trends over time.
 struct ExpenseTabView: View {
+    @EnvironmentObject private var driveConnector: GoogleDriveConnector
     @StateObject private var viewModel: ExpenseAnalyticsViewModel
     init(viewModel: @autoclosure @escaping () -> ExpenseAnalyticsViewModel) {
         _viewModel = StateObject(wrappedValue: viewModel())
@@ -10,6 +12,9 @@ struct ExpenseTabView: View {
     @State private var isShowingMonthPicker = false
     @State private var showAllCategoryRows = false
     @State private var showAllSupplierRows = false
+    @State private var isExportingCSV = false
+    @State private var exportDocument = CSVDocument(text: "")
+    @State private var exportErrorMessage: String?
 
     var body: some View {
         NavigationStack {
@@ -18,9 +23,28 @@ struct ExpenseTabView: View {
                 content
             }
             .navigationTitle("Expenses")
+            .toolbar {
+                ToolbarItem(placement: .navigationBarLeading) {
+                    Button {
+                        startExpenseExport()
+                    } label: {
+                        Image(systemName: "square.and.arrow.up")
+                    }
+                    .disabled(!viewModel.hasDataForSelection)
+                    .accessibilityLabel("Export expenses")
+                }
+            }
         }
         .task {
             await viewModel.refresh()
+        }
+        .fileExporter(isPresented: $isExportingCSV,
+                      document: exportDocument,
+                      contentType: .commaSeparatedText,
+                      defaultFilename: expenseExportFilename) { result in
+            if case let .failure(error) = result {
+                exportErrorMessage = error.localizedDescription
+            }
         }
     }
 
@@ -40,7 +64,7 @@ struct ExpenseTabView: View {
         List {
             filterSection
 
-            Section("\(viewModel.selectedMetric.displayName) for \(viewModel.selectedPeriodDescription)") {
+            Section("\(viewModel.selectedMetric.displayName) for \(viewModel.selectedPeriodDisplayTitle)") {
                 VStack(alignment: .leading, spacing: 8) {
                     HStack(alignment: .firstTextBaseline) {
                         Text(viewModel.totalFormatted)
@@ -51,7 +75,7 @@ struct ExpenseTabView: View {
                             .foregroundStyle(.secondary)
                     }
                     VStack(alignment: .leading, spacing: 2) {
-                        Text(viewModel.selectedPeriodDescription)
+                        Text(viewModel.selectedPeriodDetailDescription)
                             .font(.subheadline)
                             .foregroundStyle(.secondary)
                         if let percentage = totalVsRevenueText {
@@ -77,6 +101,14 @@ struct ExpenseTabView: View {
                             .foregroundStyle(.secondary)
                     }
                     .padding(.vertical, 4)
+                }
+            }
+
+            if let exportErrorMessage {
+                Section {
+                    Label(exportErrorMessage, systemImage: "exclamationmark.triangle")
+                        .foregroundColor(.orange)
+                        .font(.footnote)
                 }
             }
         }
@@ -112,7 +144,7 @@ struct ExpenseTabView: View {
 
                         Picker("Year", selection: $viewModel.selectedYear) {
                             ForEach(viewModel.availableYears, id: \.self) { year in
-                                Text(String(year)).tag(year)
+                                Text(verbatim: String(year)).tag(year)
                             }
                         }
                         .pickerStyle(.wheel)
@@ -137,6 +169,7 @@ struct ExpenseTabView: View {
         .onChange(of: viewModel.selectedMonth) { _, _ in resetBreakdownExpansion() }
         .onChange(of: viewModel.selectedYear) { _, _ in resetBreakdownExpansion() }
         .onChange(of: viewModel.selectedMetric) { _, _ in resetBreakdownExpansion() }
+        .onChange(of: viewModel.selectedFilter) { _, _ in resetBreakdownExpansion() }
     }
 
     private var filterSection: some View {
@@ -144,8 +177,23 @@ struct ExpenseTabView: View {
             VStack(alignment: .leading, spacing: 12) {
                 metricSelector
 
-                HStack(spacing: 12) {
+                Picker("Period", selection: $viewModel.selectedFilter) {
+                    ForEach(ExpenseAnalyticsViewModel.Filter.allCases) { filter in
+                        Text(filter.displayName).tag(filter)
+                    }
+                }
+                .pickerStyle(.segmented)
+
+                switch viewModel.selectedFilter {
+                case .week:
+                    if let description = viewModel.weekRangeDescription {
+                        Text(description)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                case .month:
                     periodButton
+                case .year:
                     yearPicker
                 }
             }
@@ -184,7 +232,7 @@ struct ExpenseTabView: View {
         } label: {
             HStack(spacing: 8) {
                 Image(systemName: "calendar")
-                Text(viewModel.selectedPeriodDescriptionFormatted)
+                Text(viewModel.monthPickerLabel)
                     .font(.callout)
                 Spacer()
                 Image(systemName: "chevron.down")
@@ -210,7 +258,7 @@ struct ExpenseTabView: View {
         } label: {
             HStack(spacing: 8) {
                 Image(systemName: "calendar.badge.clock")
-                Text("Year \(viewModel.selectedYear)")
+                Text(verbatim: "Year \(viewModel.selectedYear)")
                     .font(.callout)
                 Spacer()
                 Image(systemName: "chevron.down")
@@ -230,14 +278,14 @@ struct ExpenseTabView: View {
     private var categorySection: some View {
         Section("Category Breakdown") {
             if categoryRows.isEmpty {
-                Text("No categories with spending for \(viewModel.selectedPeriodDescription.lowercased()).")
+                Text("No categories with spending for \(viewModel.selectedPeriodSentence).")
                     .foregroundStyle(.secondary)
                     .padding(.vertical, 4)
             } else {
                 ExpenseBreakdownTable(nameHeader: "Category",
                                        rows: displayedCategoryRows,
-                                       revenueAvailable: viewModel.monthlyRevenueTotal != nil)
-                if viewModel.monthlyRevenueTotal == nil {
+                                       revenueAvailable: viewModel.selectedFilter == .month && viewModel.monthlyRevenueTotal != nil)
+                if viewModel.selectedFilter == .month && viewModel.monthlyRevenueTotal == nil {
                     Text("Revenue % becomes available once revenue is recorded for this month.")
                         .font(.caption2)
                         .foregroundStyle(.secondary)
@@ -260,13 +308,13 @@ struct ExpenseTabView: View {
     private var supplierSection: some View {
         Section("Supplier Breakdown") {
             if supplierRows.isEmpty {
-                Text("Supplier totals are unavailable for \(viewModel.selectedPeriodDescription.lowercased()).")
+                Text("Supplier totals are unavailable for \(viewModel.selectedPeriodSentence).")
                     .foregroundStyle(.secondary)
                     .padding(.vertical, 4)
             } else {
                 ExpenseBreakdownTable(nameHeader: "Supplier",
                                        rows: displayedSupplierRows,
-                                       revenueAvailable: viewModel.monthlyRevenueTotal != nil)
+                                       revenueAvailable: viewModel.selectedFilter == .month && viewModel.monthlyRevenueTotal != nil)
                 if supplierRows.count > Self.breakdownLimit {
                     Button(showAllSupplierRows ? "Show Top 10" : "Show All") {
                         showAllSupplierRows.toggle()
@@ -296,7 +344,9 @@ struct ExpenseTabView: View {
     }
 
     private var totalVsRevenueText: String? {
-        guard let revenue = viewModel.monthlyRevenueTotal, revenue > 0 else { return nil }
+        guard viewModel.selectedFilter == .month,
+              let revenue = viewModel.monthlyRevenueTotal,
+              revenue > 0 else { return nil }
         let ratio = viewModel.totalForSelection / revenue
         let clamped = max(min((ratio as NSDecimalNumber).doubleValue, 999), 0)
         let formatted = clamped.formatted(.percent.precision(.fractionLength(0...1)))
@@ -305,7 +355,7 @@ struct ExpenseTabView: View {
 
     private func breakdownRows(from entries: [(name: String, total: Decimal)]) -> [ExpenseBreakdownRow] {
         let periodTotal = viewModel.totalForSelection
-        let revenueTotal = viewModel.monthlyRevenueTotal
+        let revenueTotal = viewModel.selectedFilter == .month ? viewModel.monthlyRevenueTotal : nil
         return entries
             .filter { $0.total > 0 }
             .map { entry in
@@ -354,6 +404,89 @@ struct ExpenseTabView: View {
     }
 
 }
+
+private extension ExpenseTabView {
+    func startExpenseExport() {
+        let invoices = viewModel.invoicesForSelection
+        guard !invoices.isEmpty else { return }
+
+        let csvContent = makeExpenseCSV(from: invoices)
+        exportDocument = CSVDocument(text: csvContent)
+        isExportingCSV = true
+
+        let filename = expenseExportFilename
+        Task {
+            await uploadExpenseCSV(content: csvContent, filename: filename)
+        }
+    }
+
+    var expenseExportFilename: String {
+        "expense_\(expensePeriodIdentifier).csv"
+    }
+
+    var expensePeriodIdentifier: String {
+        let rawMonth = viewModel.monthName(for: viewModel.selectedMonth, short: true)
+        let sanitizedMonth = rawMonth.replacingOccurrences(of: " ", with: "")
+        return "\(sanitizedMonth)_\(viewModel.selectedYear)"
+    }
+
+    func makeExpenseCSV(from invoices: [CapturedInvoice]) -> String {
+        var rows: [[String]] = [[
+            "Date",
+            "Supplier",
+            "Total Amount",
+            "Our Amount",
+            "GST",
+            "Category"
+        ]]
+
+        for invoice in invoices {
+            rows.append([
+                expenseCSVDateFormatter.string(from: invoice.date),
+                invoice.supplier,
+                invoice.total.plainString,
+                invoice.ourAmount.plainString,
+                invoice.gst.plainString,
+                invoice.category ?? "Uncategorized"
+            ])
+        }
+
+        let totalsRow = [
+            "",
+            "TOTAL",
+            invoices.reduce(Decimal.zero) { $0 + $1.total }.plainString,
+            invoices.reduce(Decimal.zero) { $0 + $1.ourAmount }.plainString,
+            invoices.reduce(Decimal.zero) { $0 + $1.gst }.plainString,
+            ""
+        ]
+        rows.append(totalsRow)
+
+        return CSVExporting.makeCSV(from: rows)
+    }
+
+    func uploadExpenseCSV(content: String, filename: String) async {
+        let transferService = await MainActor.run { driveConnector.transferService }
+        let state = await MainActor.run { driveConnector.state }
+        guard state == .linked else { return }
+
+        do {
+            try await CSVExporting.uploadToDrive(content: content,
+                                                 filename: filename,
+                                                 transferService: transferService)
+            await MainActor.run { exportErrorMessage = nil }
+        } catch {
+            await MainActor.run {
+                exportErrorMessage = error.localizedDescription
+            }
+        }
+    }
+}
+
+private let expenseCSVDateFormatter: DateFormatter = {
+    let formatter = DateFormatter()
+    formatter.dateFormat = "yyyy-MM-dd"
+    return formatter
+}()
 
 private struct ExpenseBreakdownRow: Identifiable {
     let name: String

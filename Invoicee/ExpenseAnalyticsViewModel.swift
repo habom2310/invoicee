@@ -19,6 +19,22 @@ final class ExpenseAnalyticsViewModel: ObservableObject {
         }
     }
 
+    enum Filter: String, CaseIterable, Identifiable {
+        case week
+        case month
+        case year
+
+        var id: String { rawValue }
+
+        var displayName: String {
+            switch self {
+            case .week: return "Week"
+            case .month: return "Month"
+            case .year: return "Year"
+            }
+        }
+    }
+
     struct CategoryTotal: Identifiable {
         let category: String
         let total: Decimal
@@ -81,6 +97,16 @@ final class ExpenseAnalyticsViewModel: ObservableObject {
     private let revenueSummaryProvider: RevenueSummaryProviding?
     private var revenueTask: Task<Void, Never>? = nil
 
+    @Published var selectedFilter: Filter = .month {
+        didSet {
+            guard selectedFilter != oldValue else { return }
+            if selectedFilter == .month {
+                refreshRevenueTotal()
+            } else {
+                monthlyRevenueTotal = nil
+            }
+        }
+    }
     @Published private(set) var previousMonthTotals: [CategoryTotal] = []
     @Published private(set) var previousMonthDescription: String? = nil
     @Published private(set) var monthlyRevenueTotal: Decimal? = nil
@@ -199,12 +225,50 @@ final class ExpenseAnalyticsViewModel: ObservableObject {
         return totals
     }
 
-    var selectedPeriodDescription: String {
-        "\(monthName(for: selectedMonth, short: true)) \(selectedYear)"
+    var selectedPeriodDisplayTitle: String {
+        switch selectedFilter {
+        case .week:
+            return "This Week"
+        case .month:
+            return "\(monthName(for: selectedMonth, short: true)) \(selectedYear)"
+        case .year:
+            return "\(selectedYear)"
+        }
     }
 
-    var selectedPeriodDescriptionFormatted: String {
+    var selectedPeriodDetailDescription: String {
+        switch selectedFilter {
+        case .week:
+            return weekRangeDescription ?? "Current Week"
+        case .month:
+            return "\(monthName(for: selectedMonth, short: false)) \(selectedYear)"
+        case .year:
+            return "Calendar Year"
+        }
+    }
+
+    var selectedPeriodSentence: String {
+        switch selectedFilter {
+        case .week:
+            return "this week"
+        case .month:
+            return "\(monthName(for: selectedMonth, short: true)) \(selectedYear)"
+        case .year:
+            return "the year \(selectedYear)"
+        }
+    }
+
+    var monthPickerLabel: String {
         "\(monthName(for: selectedMonth, short: true))-\(selectedYear)"
+    }
+
+    var weekRangeDescription: String? {
+        guard let range = currentWeekRange else { return nil }
+        let formatter = DateFormatter()
+        formatter.dateStyle = .medium
+        formatter.timeStyle = .none
+        formatter.locale = Locale.current
+        return "\(formatter.string(from: range.start)) – \(formatter.string(from: range.end))"
     }
 
     var hasDataForSelection: Bool {
@@ -221,6 +285,10 @@ final class ExpenseAnalyticsViewModel: ObservableObject {
         availableMonths(for: selectedYear)
     }
 
+    var invoicesForSelection: [CapturedInvoice] {
+        filteredInvoices
+    }
+
     func monthName(for month: Int, short: Bool = false) -> String {
         guard month >= 1 && month <= ReportingDateFormatter.monthSymbols.count else { return "Month" }
         if short {
@@ -230,10 +298,28 @@ final class ExpenseAnalyticsViewModel: ObservableObject {
     }
 
     private var filteredInvoices: [CapturedInvoice] {
-        invoices.filter { invoice in
-            let components = calendar.dateComponents([.year, .month], from: invoice.date)
-            return components.year == selectedYear && components.month == selectedMonth
+        let filtered: [CapturedInvoice]
+        switch selectedFilter {
+        case .week:
+            if let range = currentWeekRange {
+                filtered = invoices.filter { invoice in
+                    let day = calendar.startOfDay(for: invoice.date)
+                    return day >= range.start && day <= range.end
+                }
+            } else {
+                filtered = []
+            }
+        case .month:
+            filtered = invoices.filter { invoice in
+                let components = calendar.dateComponents([.year, .month], from: invoice.date)
+                return components.year == selectedYear && components.month == selectedMonth
+            }
+        case .year:
+            filtered = invoices.filter { invoice in
+                calendar.component(.year, from: invoice.date) == selectedYear
+            }
         }
+        return filtered.sorted { $0.date > $1.date }
     }
 
     private func value(for invoice: CapturedInvoice) -> Decimal {
@@ -321,6 +407,7 @@ final class ExpenseAnalyticsViewModel: ObservableObject {
 
     private func propagatePeriodChange() {
         guard !isApplyingExternalPeriod else { return }
+        guard selectedFilter == .month else { return }
         periodStore?.set(month: selectedMonth, year: selectedYear)
     }
 
@@ -390,6 +477,11 @@ final class ExpenseAnalyticsViewModel: ObservableObject {
     }
 
     private func refreshRevenueTotal() {
+        guard selectedFilter == .month else {
+            monthlyRevenueTotal = nil
+            return
+        }
+
         guard let provider = revenueSummaryProvider else {
             monthlyRevenueTotal = nil
             return
@@ -407,5 +499,12 @@ final class ExpenseAnalyticsViewModel: ObservableObject {
                 self.monthlyRevenueTotal = total
             }
         }
+    }
+
+    private var currentWeekRange: (start: Date, end: Date)? {
+        guard let interval = calendar.dateInterval(of: .weekOfYear, for: Date()) else { return nil }
+        let start = calendar.startOfDay(for: interval.start)
+        guard let end = calendar.date(byAdding: .day, value: 6, to: start) else { return nil }
+        return (start, end)
     }
 }

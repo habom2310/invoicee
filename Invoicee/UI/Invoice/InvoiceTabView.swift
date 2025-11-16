@@ -152,7 +152,7 @@ struct InvoiceTabView: View {
                     Button {
                         isPresentingCaptureSheet = true
                     } label: {
-                        Image(systemName: "plus")
+                        Image(systemName: "plus.circle.fill")
                     }
                     .accessibilityLabel("Add Invoice")
                 }
@@ -432,33 +432,24 @@ extension InvoiceTabView {
         ]
         rows.append(totalsRow)
 
-        return rows
-            .map { row in row.map(csvEscape).joined(separator: ",") }
-            .joined(separator: "\n")
-    }
-
-    private func csvEscape(_ value: String) -> String {
-        let needsEscaping = value.contains(",") || value.contains("\n") || value.contains("\"")
-        guard needsEscaping else { return value }
-        let escaped = value.replacingOccurrences(of: "\"", with: "\"\"")
-        return "\"\(escaped)\""
+        return CSVExporting.makeCSV(from: rows)
     }
 
     private func uploadCSVToDrive(content: String, filename: String) async {
+        let transferService = await MainActor.run { driveConnector.transferService }
         let state = await MainActor.run { driveConnector.state }
         guard state == .linked else { return }
 
-        let tempURL = FileManager.default.temporaryDirectory.appendingPathComponent(filename)
         do {
-            try content.write(to: tempURL, atomically: true, encoding: .utf8)
-            try await driveConnector.transferService.uploadExport(fileURL: tempURL, fileName: filename)
+            try await CSVExporting.uploadToDrive(content: content,
+                                                 filename: filename,
+                                                 transferService: transferService)
             await MainActor.run { remoteSyncError = nil }
         } catch {
             await MainActor.run {
                 remoteSyncError = error.localizedDescription
             }
         }
-        try? FileManager.default.removeItem(at: tempURL)
     }
 
     private func removeInvoice(_ invoice: CapturedInvoice) {

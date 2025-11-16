@@ -1,10 +1,15 @@
 internal import SwiftUI
+import UniformTypeIdentifiers
 
 /// Displays revenue summaries and daily entries with editing support.
 struct RevenueTabView: View {
+    @EnvironmentObject private var driveConnector: GoogleDriveConnector
     @StateObject private var viewModel: RevenueViewModel
     private let monthSymbols = Calendar.current.monthSymbols
     @State private var isShowingMonthPicker = false
+    @State private var isExportingCSV = false
+    @State private var exportDocument = CSVDocument(text: "")
+    @State private var exportErrorMessage: String?
 
     init(viewModel: @autoclosure @escaping () -> RevenueViewModel) {
         _viewModel = StateObject(wrappedValue: viewModel())
@@ -15,6 +20,16 @@ struct RevenueTabView: View {
             content
                 .navigationTitle("Revenue")
                 .toolbar {
+                    ToolbarItem(placement: .topBarLeading) {
+                        Button {
+                            startRevenueExport()
+                        } label: {
+                            Image(systemName: "square.and.arrow.up")
+                        }
+                        .disabled(viewModel.listEntries.isEmpty)
+                        .accessibilityLabel("Export revenue")
+                    }
+
                     ToolbarItem(placement: .topBarTrailing) {
                         if viewModel.canRecordRevenue {
                             Button {
@@ -33,6 +48,14 @@ struct RevenueTabView: View {
         .task {
             if viewModel.canRecordRevenue {
                 await viewModel.refresh()
+            }
+        }
+        .fileExporter(isPresented: $isExportingCSV,
+                      document: exportDocument,
+                      contentType: .commaSeparatedText,
+                      defaultFilename: revenueExportFilename) { result in
+            if case let .failure(error) = result {
+                exportErrorMessage = error.localizedDescription
             }
         }
     }
@@ -77,6 +100,14 @@ struct RevenueTabView: View {
                         .font(.footnote)
                 }
             }
+
+            if let exportErrorMessage {
+                Section {
+                    Label(exportErrorMessage, systemImage: "exclamationmark.triangle")
+                        .foregroundColor(.orange)
+                        .font(.footnote)
+                }
+            }
         }
         .listStyle(.insetGrouped)
         .overlay {
@@ -105,7 +136,7 @@ struct RevenueTabView: View {
 
                         Picker("Year", selection: $viewModel.selectedYear) {
                             ForEach(viewModel.availableYears, id: \.self) { year in
-                                Text(String(year)).tag(year)
+                                Text(verbatim: String(year)).tag(year)
                             }
                         }
                         .pickerStyle(.wheel)
@@ -146,7 +177,7 @@ struct RevenueTabView: View {
                     } label: {
                         HStack {
                             Image(systemName: "calendar")
-                            Text("\(monthSymbols[max(0, min(viewModel.selectedMonth - 1, monthSymbols.count - 1))]) \(viewModel.selectedYear)")
+                            Text(verbatim: "\(monthSymbols[max(0, min(viewModel.selectedMonth - 1, monthSymbols.count - 1))]) \(viewModel.selectedYear)")
                                 .font(.callout)
                                 .foregroundStyle(.primary)
                             Spacer()
@@ -163,7 +194,7 @@ struct RevenueTabView: View {
                 case .year:
                     Picker("Year", selection: $viewModel.selectedYear) {
                         ForEach(viewModel.availableYears, id: \.self) { year in
-                            Text(String(year)).tag(year)
+                            Text(verbatim: String(year)).tag(year)
                         }
                     }
                     .pickerStyle(.menu)
@@ -220,6 +251,117 @@ struct RevenueTabView: View {
         .padding()
     }
 }
+
+private extension RevenueTabView {
+    func startRevenueExport() {
+        let entries = viewModel.listEntries
+        guard !entries.isEmpty else { return }
+
+        let csvContent = makeRevenueCSV(from: entries)
+        exportDocument = CSVDocument(text: csvContent)
+        isExportingCSV = true
+
+        let filename = revenueExportFilename
+        Task {
+            await uploadRevenueCSV(content: csvContent, filename: filename)
+        }
+    }
+
+    var revenueExportFilename: String {
+        "revenue_\(revenuePeriodIdentifier).csv"
+    }
+
+    var revenuePeriodIdentifier: String {
+        switch viewModel.selectedFilter {
+        case .week:
+            if let range = viewModel.currentWeekRange {
+                let start = weekFilenameFormatter.string(from: range.start)
+                let end = weekFilenameFormatter.string(from: range.end)
+                return "Week_\(start)_\(end)"
+            }
+            return "Week_Current"
+        case .month:
+            let monthIndex = max(1, min(viewModel.selectedMonth, revenueShortMonthSymbols.count))
+            let month = revenueShortMonthSymbols[monthIndex - 1].replacingOccurrences(of: " ", with: "")
+            return "\(month)_\(viewModel.selectedYear)"
+        case .year:
+            return "\(viewModel.selectedYear)"
+        }
+    }
+
+    func makeRevenueCSV(from entries: [RevenueDayEntry]) -> String {
+        let periodHeader = viewModel.selectedFilter == .year ? "Month" : "Date"
+        var rows: [[String]] = [[periodHeader, "Stream", "Amount"]]
+        var total: Decimal = .zero
+
+        for entry in entries {
+            let label = entryLabel(for: entry)
+            if entry.streams.isEmpty {
+                rows.append([label, "Total", entry.total.plainString])
+                total += entry.total
+                continue
+            }
+
+            for stream in entry.streams {
+                rows.append([label, stream.name, stream.amount.plainString])
+            }
+            rows.append([label, "TOTAL", entry.total.plainString])
+            total += entry.total
+        }
+
+        rows.append(["", "OVERALL TOTAL", total.plainString])
+        return CSVExporting.makeCSV(from: rows)
+    }
+
+    func entryLabel(for entry: RevenueDayEntry) -> String {
+        switch viewModel.selectedFilter {
+        case .year:
+            return revenueMonthFormatter.string(from: entry.date)
+        default:
+            return revenueDayFormatter.string(from: entry.date)
+        }
+    }
+
+    func uploadRevenueCSV(content: String, filename: String) async {
+        let transferService = await MainActor.run { driveConnector.transferService }
+        let state = await MainActor.run { driveConnector.state }
+        guard state == .linked else { return }
+
+        do {
+            try await CSVExporting.uploadToDrive(content: content,
+                                                 filename: filename,
+                                                 transferService: transferService)
+            await MainActor.run { exportErrorMessage = nil }
+        } catch {
+            await MainActor.run {
+                exportErrorMessage = error.localizedDescription
+            }
+        }
+    }
+}
+
+private let revenueDayFormatter: DateFormatter = {
+    let formatter = DateFormatter()
+    formatter.dateFormat = "yyyy-MM-dd"
+    return formatter
+}()
+
+private let revenueMonthFormatter: DateFormatter = {
+    let formatter = DateFormatter()
+    formatter.dateFormat = "MMM yyyy"
+    return formatter
+}()
+
+private let weekFilenameFormatter: DateFormatter = {
+    let formatter = DateFormatter()
+    formatter.dateFormat = "MMM_dd_yyyy"
+    return formatter
+}()
+
+private let revenueShortMonthSymbols: [String] = {
+    let formatter = DateFormatter()
+    return formatter.shortMonthSymbols
+}()
 
 private struct RevenueEntryRow: View {
     let title: String

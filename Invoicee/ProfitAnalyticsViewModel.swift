@@ -212,6 +212,17 @@ final class ProfitAnalyticsViewModel: ObservableObject {
         "\(monthName(for: selectedMonth)) \(selectedYear)"
     }
 
+    var selectedDateRange: (start: Date, end: Date)? {
+        switch selectedFilter {
+        case .week:
+            return weekBounds(containing: Date())
+        case .month:
+            return monthRange(month: selectedMonth, year: selectedYear)
+        case .year:
+            return yearRange(year: selectedYear)
+        }
+    }
+
     func monthName(for month: Int) -> String {
         guard month >= 1, month <= monthSymbols.count else { return "Month" }
         return monthSymbols[month - 1]

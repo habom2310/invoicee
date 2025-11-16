@@ -159,6 +159,10 @@ final class RevenueViewModel: ObservableObject {
         return years.sorted()
     }
 
+    var currentWeekRange: (start: Date, end: Date)? {
+        weekBounds(containing: Date())
+    }
+
     // MARK: - Form Helpers
 
     func beginAddingRevenue(for date: Date? = nil) {
