@@ -14,6 +14,7 @@ final class AppEnvironment: ObservableObject {
     let syncTracker: InvoiceSyncTracker
     let categoryStore: InvoiceCategoryStore
     let revenueStore: RevenueStoring
+    let revenueSummaryProvider: RevenueSummaryProviding
     private var cancellables: Set<AnyCancellable> = []
 
     init(reportingPeriodStore: ReportingPeriodStore,
@@ -23,7 +24,8 @@ final class AppEnvironment: ObservableObject {
          remoteSynchronizer: InvoiceRemoteSynchronizer,
          syncTracker: InvoiceSyncTracker,
          categoryStore: InvoiceCategoryStore,
-         revenueStore: RevenueStoring) {
+         revenueStore: RevenueStoring,
+         revenueSummaryProvider: RevenueSummaryProviding) {
         self.reportingPeriodStore = reportingPeriodStore
         self.invoiceArchive = invoiceArchive
         self.driveConnector = driveConnector
@@ -32,6 +34,7 @@ final class AppEnvironment: ObservableObject {
         self.syncTracker = syncTracker
         self.categoryStore = categoryStore
         self.revenueStore = revenueStore
+        self.revenueSummaryProvider = revenueSummaryProvider
 
         categoryStore.updateCategories(from: invoiceArchive.invoices)
         invoiceArchive.$invoices
@@ -85,6 +88,8 @@ final class AppEnvironment: ObservableObject {
         }
         let categoryStore = InvoiceCategoryStore()
         let revenueStore = RevenueFirestoreStore()
+        let revenueSummaryProvider = RevenueSummaryProvider(store: revenueStore,
+                                                            driveConnector: connector)
         let environment = AppEnvironment(reportingPeriodStore: reportingPeriodStore,
                                          invoiceArchive: invoiceArchive,
                                          driveConnector: connector,
@@ -92,7 +97,8 @@ final class AppEnvironment: ObservableObject {
                                          remoteSynchronizer: remoteSynchronizer,
                                          syncTracker: syncTracker,
                                          categoryStore: categoryStore,
-                                         revenueStore: revenueStore)
+                                         revenueStore: revenueStore,
+                                         revenueSummaryProvider: revenueSummaryProvider)
         return environment
     }
 }

@@ -4,6 +4,7 @@ internal import SwiftUI
 struct RevenueTabView: View {
     @StateObject private var viewModel: RevenueViewModel
     private let monthSymbols = Calendar.current.monthSymbols
+    @State private var isShowingMonthPicker = false
 
     init(viewModel: @autoclosure @escaping () -> RevenueViewModel) {
         _viewModel = StateObject(wrappedValue: viewModel())
@@ -47,20 +48,22 @@ struct RevenueTabView: View {
 
     private var revenueList: some View {
         List {
+            filterControls
             summarySection
 
-            Section("Daily Revenue") {
-                if viewModel.entries.isEmpty {
+            Section(viewModel.selectedFilter == .year ? "Monthly Revenue" : "Daily Revenue") {
+                if viewModel.listEntries.isEmpty {
                     Label("No revenue recorded yet.", systemImage: "chart.line.uptrend.xyaxis")
                         .foregroundStyle(.secondary)
                         .padding(.vertical, 8)
                 } else {
-                    ForEach(viewModel.entries) { entry in
-                        RevenueEntryRow(entry: entry,
+                    ForEach(viewModel.listEntries) { entry in
+                        RevenueEntryRow(title: viewModel.displayTitle(for: entry),
                                         total: entry.total.formattedCurrency(),
                                         subtitle: viewModel.formattedStreams(for: entry))
                             .contentShape(Rectangle())
                             .onTapGesture {
+                                guard viewModel.selectedFilter != .year else { return }
                                 viewModel.beginAddingRevenue(for: entry.date)
                             }
                     }
@@ -82,6 +85,96 @@ struct RevenueTabView: View {
             }
         }
         .background(Color.invoiceBackground)
+        .sheet(isPresented: $isShowingMonthPicker) {
+            NavigationStack {
+                VStack {
+                    Text("Select Month")
+                        .font(.headline)
+                        .padding(.top)
+
+                    HStack(spacing: 0) {
+                        Picker("Month", selection: $viewModel.selectedMonth) {
+                            ForEach(1...12, id: \.self) { month in
+                                Text(monthSymbols[month - 1]).tag(month)
+                            }
+                        }
+                        .pickerStyle(.wheel)
+                        .frame(maxWidth: .infinity)
+                        .frame(height: 180)
+                        .clipped()
+
+                        Picker("Year", selection: $viewModel.selectedYear) {
+                            ForEach(viewModel.availableYears, id: \.self) { year in
+                                Text(String(year)).tag(year)
+                            }
+                        }
+                        .pickerStyle(.wheel)
+                        .frame(maxWidth: .infinity)
+                        .frame(height: 180)
+                        .clipped()
+                    }
+                    .padding(.horizontal)
+
+                    Spacer()
+                }
+                .toolbar {
+                    ToolbarItem(placement: .confirmationAction) {
+                        Button("Done") {
+                            isShowingMonthPicker = false
+                        }
+                    }
+                }
+            }
+            .presentationDetents([.height(320), .medium])
+        }
+    }
+
+    private var filterControls: some View {
+        Section {
+            VStack(alignment: .leading, spacing: 12) {
+                Picker("Period", selection: $viewModel.selectedFilter) {
+                    ForEach(RevenueViewModel.SummaryFilter.allCases) { filter in
+                        Text(filter.displayName).tag(filter)
+                    }
+                }
+                .pickerStyle(.segmented)
+
+                switch viewModel.selectedFilter {
+                case .month:
+                    Button {
+                        isShowingMonthPicker = true
+                    } label: {
+                        HStack {
+                            Image(systemName: "calendar")
+                            Text("\(monthSymbols[max(0, min(viewModel.selectedMonth - 1, monthSymbols.count - 1))]) \(viewModel.selectedYear)")
+                                .font(.callout)
+                                .foregroundStyle(.primary)
+                            Spacer()
+                            Image(systemName: "chevron.down")
+                                .font(.footnote)
+                                .foregroundStyle(.secondary)
+                        }
+                        .padding(.vertical, 8)
+                        .padding(.horizontal, 12)
+                        .background(Color.secondary.opacity(0.1))
+                        .clipShape(RoundedRectangle(cornerRadius: 10))
+                    }
+                    .buttonStyle(.plain)
+                case .year:
+                    Picker("Year", selection: $viewModel.selectedYear) {
+                        ForEach(viewModel.availableYears, id: \.self) { year in
+                            Text(String(year)).tag(year)
+                        }
+                    }
+                    .pickerStyle(.menu)
+                default:
+                    Text(viewModel.summarySubtitle)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .padding(.vertical, 4)
+        }
     }
 
     private var summarySection: some View {
@@ -100,36 +193,15 @@ struct RevenueTabView: View {
                         .font(.system(size: 28, weight: .bold, design: .rounded))
                 }
 
-                Picker("Period", selection: $viewModel.selectedFilter) {
-                    ForEach(RevenueViewModel.SummaryFilter.allCases) { filter in
-                        Text(filter.displayName).tag(filter)
-                    }
-                }
-                .pickerStyle(.segmented)
-
-                if viewModel.selectedFilter == .selectedMonth {
-                    HStack {
-                        Picker("Month", selection: $viewModel.selectedMonth) {
-                            ForEach(1...12, id: \.self) { month in
-                                Text(monthSymbols[month - 1]).tag(month)
-                            }
-                        }
-                        .pickerStyle(.menu)
-
-                        Picker("Year", selection: $viewModel.selectedYear) {
-                            ForEach(viewModel.availableYears, id: \.self) { year in
-                                Text(String(year)).tag(year)
-                            }
-                        }
-                        .pickerStyle(.menu)
-                    }
-                } else if viewModel.selectedFilter == .year {
-                    Picker("Year", selection: $viewModel.selectedYear) {
-                        ForEach(viewModel.availableYears, id: \.self) { year in
-                            Text(String(year)).tag(year)
-                        }
-                    }
-                    .pickerStyle(.menu)
+                if viewModel.streamTotalsForSelection.isEmpty {
+                    Text("No revenue streams recorded for this period.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .padding(.top, 4)
+                } else {
+                    RevenueStreamBreakdownTable(streams: viewModel.streamTotalsForSelection,
+                                                total: viewModel.summaryTotal)
+                        .padding(.top, 8)
                 }
             }
             .padding(.vertical, 4)
@@ -150,14 +222,14 @@ struct RevenueTabView: View {
 }
 
 private struct RevenueEntryRow: View {
-    let entry: RevenueDayEntry
+    let title: String
     let total: String
     let subtitle: [String]
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack(alignment: .firstTextBaseline) {
-                Text(entry.date, style: .date)
+                Text(title)
                     .font(.subheadline)
                     .foregroundStyle(.primary)
                 Spacer()
@@ -175,6 +247,59 @@ private struct RevenueEntryRow: View {
     }
 }
 
+private struct RevenueStreamBreakdownTable: View {
+    let streams: [RevenueStreamValue]
+    let total: Decimal
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack {
+                Text("Stream")
+                    .font(.caption.smallCaps())
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                Text("Amount")
+                    .font(.caption.smallCaps())
+                    .foregroundStyle(.secondary)
+                    .frame(width: 100, alignment: .trailing)
+                Text("%")
+                    .font(.caption.smallCaps())
+                    .foregroundStyle(.secondary)
+                    .frame(width: 60, alignment: .trailing)
+            }
+            .padding(.vertical, 6)
+
+            Divider()
+
+            ForEach(streams, id: \.name) { stream in
+                HStack {
+                    Text(stream.name)
+                        .font(.subheadline)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .lineLimit(1)
+                    Text(stream.amount.formattedCurrency())
+                        .font(.footnote)
+                        .frame(width: 100, alignment: .trailing)
+                    Text(formattedPercent(for: stream.amount))
+                        .font(.footnote)
+                        .frame(width: 60, alignment: .trailing)
+                }
+                .padding(.vertical, 6)
+
+                if stream.name != streams.last?.name {
+                    Divider()
+                }
+            }
+        }
+    }
+
+    private func formattedPercent(for value: Decimal) -> String {
+        guard total > 0 else { return "—" }
+        let ratio = (value as NSDecimalNumber).doubleValue / (total as NSDecimalNumber).doubleValue
+        return ratio.formatted(.percent.precision(.fractionLength(0...1)))
+    }
+}
+
 private struct RevenueFormSheet: View {
     @ObservedObject var viewModel: RevenueViewModel
     @Environment(\.dismiss) private var dismiss
@@ -187,7 +312,7 @@ private struct RevenueFormSheet: View {
                                selection: $viewModel.formDate,
                                in: ...Date(),
                                displayedComponents: .date)
-                        .onChange(of: viewModel.formDate) { _ in
+                        .onChange(of: viewModel.formDate) { _, _ in
                             viewModel.handleFormDateChange()
                         }
                 }

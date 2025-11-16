@@ -18,7 +18,8 @@ struct ContentView: View {
                 }
 
             ExpenseTabView(viewModel: ExpenseAnalyticsViewModel(archive: appEnvironment.invoiceArchive,
-                                                                 periodStore: appEnvironment.reportingPeriodStore))
+                                                                 periodStore: appEnvironment.reportingPeriodStore,
+                                                                 revenueSummaryProvider: appEnvironment.revenueSummaryProvider))
                 .tabItem {
                     Label("Expense", systemImage: "chart.pie")
                 }
@@ -27,6 +28,13 @@ struct ContentView: View {
                                                        driveConnector: appEnvironment.driveConnector))
                 .tabItem {
                     Label("Revenue", systemImage: "dollarsign.arrow.circlepath")
+                }
+
+            ProfitTabView(viewModel: ProfitAnalyticsViewModel(invoiceArchive: appEnvironment.invoiceArchive,
+                                                              revenueStore: appEnvironment.revenueStore,
+                                                              driveConnector: appEnvironment.driveConnector))
+                .tabItem {
+                    Label("Profit", systemImage: "chart.line.uptrend.xyaxis")
                 }
 
             ProfileTabView(viewModel: appEnvironment.makeDriveLinkViewModel())

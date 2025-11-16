@@ -7,8 +7,7 @@ internal import SwiftUI
 final class RevenueViewModel: ObservableObject {
     enum SummaryFilter: String, CaseIterable, Identifiable {
         case week
-        case thisMonth
-        case selectedMonth
+        case month
         case year
 
         var id: String { rawValue }
@@ -16,8 +15,7 @@ final class RevenueViewModel: ObservableObject {
         var displayName: String {
             switch self {
             case .week: return "Week"
-            case .thisMonth: return "This Month"
-            case .selectedMonth: return "Selected Month"
+            case .month: return "Month"
             case .year: return "Year"
             }
         }
@@ -114,9 +112,7 @@ final class RevenueViewModel: ObservableObject {
         case .week:
             guard let bounds = weekBounds(containing: Date()) else { return .zero }
             return total(from: bounds.start, to: bounds.end)
-        case .thisMonth:
-            return total(forMonthContaining: Date())
-        case .selectedMonth:
+        case .month:
             guard let date = calendar.date(from: DateComponents(year: selectedYear, month: selectedMonth, day: 1)) else { return .zero }
             return total(forMonthContaining: date)
         case .year:
@@ -128,9 +124,10 @@ final class RevenueViewModel: ObservableObject {
         switch selectedFilter {
         case .week:
             return "This Week"
-        case .thisMonth:
-            return "This Month"
-        case .selectedMonth:
+        case .month:
+            if isViewingCurrentMonth {
+                return "This Month"
+            }
             let monthName = monthName(for: selectedMonth)
             return "\(monthName) \(selectedYear)"
         case .year:
@@ -143,9 +140,10 @@ final class RevenueViewModel: ObservableObject {
         case .week:
             guard let bounds = weekBounds(containing: Date()) else { return "" }
             return "\(formatted(bounds.start)) – \(formatted(bounds.end))"
-        case .thisMonth:
-            return monthName(for: calendar.component(.month, from: Date()))
-        case .selectedMonth:
+        case .month:
+            if isViewingCurrentMonth {
+                return monthName(for: selectedMonth)
+            }
             return "Custom Month"
         case .year:
             return "Calendar Year"
@@ -178,6 +176,10 @@ final class RevenueViewModel: ObservableObject {
             formStreams = existing.streams.map { stream in
                 EditableRevenueStream(name: stream.name, amountText: stream.amount.formattedCurrency(omitSymbol: true))
             }
+        } else {
+            formStreams = knownStreams.isEmpty
+                ? [EditableRevenueStream(name: "", amountText: "")]
+                : knownStreams.map { EditableRevenueStream(name: $0, amountText: "") }
         }
     }
 
@@ -231,6 +233,52 @@ final class RevenueViewModel: ObservableObject {
         !entries.isEmpty
     }
 
+    var filteredEntries: [RevenueDayEntry] {
+        guard !entries.isEmpty else { return [] }
+        switch selectedFilter {
+        case .week:
+            guard let bounds = weekBounds(containing: Date()) else { return [] }
+            return entries.filter { $0.date >= bounds.start && $0.date <= bounds.end }
+        case .month:
+            return entries.filter {
+                calendar.component(.month, from: $0.date) == selectedMonth &&
+                calendar.component(.year, from: $0.date) == selectedYear
+            }
+        case .year:
+            return entries.filter {
+                calendar.component(.year, from: $0.date) == selectedYear
+            }
+        }
+    }
+
+    var streamTotalsForSelection: [RevenueStreamValue] {
+        let totals = filteredEntries.reduce(into: [String: Decimal]()) { result, entry in
+            entry.streams.forEach { stream in
+                result[stream.name, default: 0] += stream.amount
+            }
+        }
+
+        return totals
+            .map { RevenueStreamValue(name: $0.key, amount: $0.value) }
+            .sorted { $0.amount > $1.amount }
+    }
+
+    var listEntries: [RevenueDayEntry] {
+        if selectedFilter == .year {
+            return aggregateEntries(forYear: selectedYear)
+        }
+        return filteredEntries
+    }
+
+    func displayTitle(for entry: RevenueDayEntry) -> String {
+        if selectedFilter == .year {
+            let month = calendar.component(.month, from: entry.date)
+            let year = calendar.component(.year, from: entry.date)
+            return "\(monthName(for: month)) \(year)"
+        }
+        return formatted(entry.date)
+    }
+
     // MARK: - Private helpers
 
     private func observeDriveState() {
@@ -253,6 +301,11 @@ final class RevenueViewModel: ObservableObject {
 
     private func entry(for date: Date) -> RevenueDayEntry? {
         entries.first { calendar.isDate($0.date, inSameDayAs: date) }
+    }
+
+    private var isViewingCurrentMonth: Bool {
+        let today = calendar.dateComponents([.year, .month], from: Date())
+        return today.month == selectedMonth && today.year == selectedYear
     }
 
     private func streamsForNewEntry(on date: Date) -> [EditableRevenueStream] {
@@ -298,6 +351,34 @@ final class RevenueViewModel: ObservableObject {
         let replacement = RevenueDayEntry(documentID: entry.documentID, date: normalizedDate, streams: entry.streams)
         updated.append(replacement)
         entries = updated.sorted { $0.date > $1.date }
+    }
+
+    private func aggregateEntries(forYear year: Int) -> [RevenueDayEntry] {
+        let yearlyEntries = entries.filter {
+            calendar.component(.year, from: $0.date) == year
+        }
+
+        let grouped = Dictionary(grouping: yearlyEntries) { entry in
+            calendar.component(.month, from: entry.date)
+        }
+
+        let aggregated = grouped.map { month, monthEntries -> RevenueDayEntry in
+            var totals: [String: Decimal] = [:]
+            monthEntries.forEach { entry in
+                entry.streams.forEach { stream in
+                    totals[stream.name, default: 0] += stream.amount
+                }
+            }
+
+            let streams = totals
+                .map { RevenueStreamValue(name: $0.key, amount: $0.value) }
+                .sorted { $0.amount > $1.amount }
+
+            let displayDate = calendar.date(from: DateComponents(year: year, month: month, day: 1)) ?? Date()
+            return RevenueDayEntry(documentID: "\(year)-\(month)", date: displayDate, streams: streams)
+        }
+
+        return aggregated.sorted { $0.date > $1.date }
     }
 
     private func total(forMonthContaining date: Date) -> Decimal {

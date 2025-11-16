@@ -50,6 +50,7 @@ final class ExpenseAnalyticsViewModel: ObservableObject {
             }
             normalizeMonthForCurrentSelection()
             propagatePeriodChange()
+            refreshRevenueTotal()
         }
     }
     @Published var selectedMonth: Int = Calendar.current.component(.month, from: Date()) {
@@ -67,6 +68,7 @@ final class ExpenseAnalyticsViewModel: ObservableObject {
             }
             updatePreviousMonthData()
             propagatePeriodChange()
+            refreshRevenueTotal()
         }
     }
 
@@ -76,9 +78,12 @@ final class ExpenseAnalyticsViewModel: ObservableObject {
     private let periodStore: ReportingPeriodStore?
     private var periodCancellable: AnyCancellable?
     private var isApplyingExternalPeriod = false
+    private let revenueSummaryProvider: RevenueSummaryProviding?
+    private var revenueTask: Task<Void, Never>? = nil
 
     @Published private(set) var previousMonthTotals: [CategoryTotal] = []
     @Published private(set) var previousMonthDescription: String? = nil
+    @Published private(set) var monthlyRevenueTotal: Decimal? = nil
 
     /// - Parameters:
     ///   - archive: Source of captured invoices.
@@ -86,10 +91,12 @@ final class ExpenseAnalyticsViewModel: ObservableObject {
     ///   - periodStore: Optional shared selection store to keep views in sync.
     init(archive: InvoiceArchive,
          calendar: Calendar = .current,
-         periodStore: ReportingPeriodStore? = nil) {
+         periodStore: ReportingPeriodStore? = nil,
+         revenueSummaryProvider: RevenueSummaryProviding? = nil) {
         self.archive = archive
         self.calendar = calendar
         self.periodStore = periodStore
+        self.revenueSummaryProvider = revenueSummaryProvider
 
         if let store = periodStore {
             selectedYear = store.selectedYear
@@ -112,6 +119,7 @@ final class ExpenseAnalyticsViewModel: ObservableObject {
         invoices = archive.invoices
         updatePreviousMonthData()
         syncSelectionWithBounds()
+        refreshRevenueTotal()
 
         if let store = periodStore {
             observePeriodStore(store)
@@ -130,6 +138,7 @@ final class ExpenseAnalyticsViewModel: ObservableObject {
         }
         updatePreviousMonthData()
         syncSelectionWithBounds()
+        refreshRevenueTotal()
         isLoading = false
     }
 
@@ -307,6 +316,7 @@ final class ExpenseAnalyticsViewModel: ObservableObject {
         syncSelectionWithBounds()
         isApplyingExternalPeriod = false
         propagatePeriodChange()
+        refreshRevenueTotal()
     }
 
     private func propagatePeriodChange() {
@@ -350,6 +360,7 @@ final class ExpenseAnalyticsViewModel: ObservableObject {
         }
 
         updatePreviousMonthData()
+        refreshRevenueTotal()
     }
 
     private var previousMonthComponents: DateComponents? {
@@ -373,4 +384,28 @@ final class ExpenseAnalyticsViewModel: ObservableObject {
 
     private static let monthSymbols = ReportingDateFormatter.monthSymbols
     private static let shortMonthSymbols = ReportingDateFormatter.shortMonthSymbols
+
+    deinit {
+        revenueTask?.cancel()
+    }
+
+    private func refreshRevenueTotal() {
+        guard let provider = revenueSummaryProvider else {
+            monthlyRevenueTotal = nil
+            return
+        }
+
+        let month = selectedMonth
+        let year = selectedYear
+
+        revenueTask?.cancel()
+        revenueTask = Task { [weak self] in
+            let total = await provider.totalRevenue(forMonth: month, year: year)
+            await MainActor.run {
+                guard let self else { return }
+                guard self.selectedMonth == month && self.selectedYear == year else { return }
+                self.monthlyRevenueTotal = total
+            }
+        }
+    }
 }
