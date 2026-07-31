@@ -1,12 +1,4 @@
 internal import SwiftUI
-import UniformTypeIdentifiers
-
-#if canImport(UIKit)
-import UIKit
-#endif
-#if canImport(AppKit)
-import AppKit
-#endif
 
 /// Primary entry point for browsing, filtering, and syncing invoices.
 struct InvoiceTabView: View {
@@ -15,136 +7,41 @@ struct InvoiceTabView: View {
     @EnvironmentObject private var driveConnector: GoogleDriveConnector
     @EnvironmentObject private var periodStore: ReportingPeriodStore
     @EnvironmentObject private var appEnvironment: AppEnvironment
-    @State private var isPresentingCaptureSheet = false
-    @State private var invoices: [CapturedInvoice] = []
-    @State private var isRemoteSyncing = false
-    @State private var remoteSyncError: String? = nil
-    @State private var hasAttemptedInitialSync = false
 
-    @State private var searchText: String = ""
-    @State private var selectedCategory: String? = nil
+    @StateObject private var export = CSVExportController()
+    @State private var isPresentingCaptureSheet = false
+    @State private var isRemoteSyncing = false
+    @State private var remoteSyncError: String?
+    @State private var hasAttemptedInitialSync = false
+    @State private var searchText = ""
+    @State private var selectedCategory: String?
     @State private var isShowingMonthPicker = false
     @State private var isShowingSearchSheet = false
-    @State private var isExportingCSV = false
-    @State private var exportDocument = CSVDocument(text: "")
 
     var body: some View {
+        // Both derived once per pass and handed down. `filteredInvoices` filters and sorts
+        // the whole archive and `periodOptions` walks every invoice date; as computed
+        // properties they ran three and four times respectively on every body evaluation.
+        let options = ReportingPeriodOptions(dates: archive.invoices.map(\.date))
+        let invoices = filteredInvoices
+
         NavigationStack {
             Group {
-                if invoices.isEmpty {
-                    VStack(spacing: 24) {
-                        Image(systemName: "doc.text.magnifyingglass")
-                            .font(.system(size: 68))
-                            .foregroundStyle(.blue)
-
-                        Text("Capture your invoices or enter details manually to prepare them for processing.")
-                            .font(.title3)
-                            .multilineTextAlignment(.center)
-                            .foregroundStyle(.secondary)
-                            .padding(.horizontal)
-
-                        Spacer()
-                    }
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    .background(Color.invoiceBackground)
+                if archive.invoices.isEmpty {
+                    emptyState
                 } else {
-                    ZStack(alignment: .bottomTrailing) {
-                        List {
-                            if let linkIssue = driveConnector.linkIssueMessage {
-                                Section {
-                                    VStack(alignment: .leading, spacing: 8) {
-                                        Label(linkIssue, systemImage: "exclamationmark.triangle.fill")
-                                            .foregroundStyle(.orange)
-                                            .font(.footnote)
-                                            .multilineTextAlignment(.leading)
-
-                                        if driveConnector.state == .signedOut {
-                                            Button {
-                                                Task { await driveConnector.linkAccount() }
-                                            } label: {
-                                                Label("Relink Google Drive", systemImage: "link")
-                                                    .font(.footnote)
-                                            }
-                                            .buttonStyle(.borderless)
-                                        } else if driveConnector.state == .failed {
-                                            Button {
-                                                driveConnector.refreshLinkState()
-                                            } label: {
-                                                Label("Retry Connection Check", systemImage: "arrow.clockwise")
-                                                    .font(.footnote)
-                                            }
-                                            .buttonStyle(.borderless)
-                                        }
-                                    }
-                                    .padding(.vertical, 4)
-                                }
-                            }
-
-                            if let remoteSyncError {
-                                Section {
-                                    Label(remoteSyncError, systemImage: "exclamationmark.triangle")
-                                        .foregroundStyle(.orange)
-                                        .font(.footnote)
-                                }
-                            }
-
-                            filterSection
-
-                            Section("Invoices") {
-                                if filteredInvoices.isEmpty {
-                                    Text("No invoices match your filters.")
-                                        .foregroundStyle(.secondary)
-                                } else {
-                                    ForEach(filteredInvoices) { invoice in
-                                        if let binding = binding(for: invoice) {
-                                            NavigationLink {
-                                                InvoiceDetailView(invoice: binding,
-                                                                  onDelete: removeInvoice)
-                                            } label: {
-                                                CapturedInvoiceRow(invoice: invoice,
-                                                                   isSynced: archive.syncedInvoiceIDs.contains(invoice.id))
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                        .listStyle(.insetGrouped)
-
-                        Button {
-                            isShowingSearchSheet.toggle()
-                        } label: {
-                            HStack(spacing: 6) {
-                                if searchText.isEmpty {
-                                    Image(systemName: "magnifyingglass")
-                                        .font(.headline)
-                                } else {
-                                    Text(searchText)
-                                        .font(.caption)
-                                        .lineLimit(1)
-                                }
-                            }
-                            .padding(.horizontal, searchText.isEmpty ? 14 : 16)
-                            .padding(.vertical, 12)
-                            .background(Color.blue.opacity(0.9))
-                            .foregroundStyle(.white)
-                            .clipShape(Capsule())
-                            .shadow(radius: 4)
-                        }
-                        .padding()
-                        .accessibilityLabel("Search invoices")
-                    }
+                    invoiceList(invoices)
                 }
             }
             .navigationTitle("Invoices")
             .toolbar {
                 ToolbarItem(placement: .navigationBarLeading) {
                     Button {
-                        startCSVExport()
+                        startCSVExport(invoices)
                     } label: {
                         Image(systemName: "square.and.arrow.up")
                     }
-                    .disabled(filteredInvoices.isEmpty)
+                    .disabled(invoices.isEmpty)
                     .accessibilityLabel("Export filtered invoices")
                 }
 
@@ -159,327 +56,175 @@ struct InvoiceTabView: View {
             }
             .sheet(isPresented: $isPresentingCaptureSheet) {
                 InvoiceCaptureSheet(categoryStore: categoryStore,
-                                    knownSuppliers: invoices.map { $0.supplier },
+                                    knownSuppliers: archive.invoices.map(\.supplier),
                                     isPresented: $isPresentingCaptureSheet) { invoice in
                     withAnimation(.spring(response: 0.35, dampingFraction: 0.85)) {
-                        invoices.insert(invoice, at: 0)
+                        archive.upsert(invoice)
                     }
                 }
                 .presentationDetents([.large])
                 .interactiveDismissDisabled(true)
             }
         }
-            .sheet(isPresented: $isShowingSearchSheet) {
-                NavigationStack {
-                    Form {
-                        Section("Supplier") {
-                            TextField("Enter supplier name", text: $searchText)
-                            .textInputAutocapitalization(.words)
-                            .autocorrectionDisabled()
-                    }
-                }
-                .navigationTitle("Search")
-                .navigationBarTitleDisplayMode(.inline)
-                .toolbar {
-                    ToolbarItem(placement: .cancellationAction) {
-                        Button("Clear") {
-                            searchText = ""
-                            isShowingSearchSheet = false
-                        }
-                    }
-
-                    ToolbarItem(placement: .confirmationAction) {
-                        Button("Done") {
-                            isShowingSearchSheet = false
-                        }
-                    }
-                }
-                }
-            }
-            .sheet(isPresented: $isShowingMonthPicker) {
-                let monthBinding = Binding<Int>(
-                    get: { periodStore.selectedMonth },
-                    set: { newValue in
-                        periodStore.set(month: newValue, year: periodStore.selectedYear)
-                        ensurePeriodSelectionIsValid()
-                    }
-                )
-
-                let yearBinding = Binding<Int>(
-                    get: { periodStore.selectedYear },
-                    set: { newValue in
-                        var targetMonth = periodStore.selectedMonth
-                        let months = availableMonths(for: newValue)
-                        if !months.isEmpty && !months.contains(targetMonth) {
-                            if newValue == currentYear {
-                                targetMonth = months.last ?? targetMonth
-                            } else {
-                                targetMonth = months.first ?? targetMonth
-                            }
-                        }
-                        periodStore.set(month: targetMonth, year: newValue)
-                        ensurePeriodSelectionIsValid()
-                    }
-                )
-
-                NavigationStack {
-                    VStack {
-                        Text("Select Month")
-                            .font(.headline)
-                            .padding(.top)
-
-                        HStack(spacing: 0) {
-                            Picker("Month", selection: monthBinding) {
-                                ForEach(availableMonths(for: yearBinding.wrappedValue), id: \.self) { month in
-                                    Text(monthName(for: month)).tag(month)
-                                }
-                            }
-                            .pickerStyle(.wheel)
-                            .frame(maxWidth: .infinity)
-                            .frame(height: 180)
-                            .clipped()
-
-                            Picker("Year", selection: yearBinding) {
-                                ForEach(availableYears, id: \.self) { year in
-                                    Text(String(year)).tag(year)
-                                }
-                            }
-                            .pickerStyle(.wheel)
-                            .frame(maxWidth: .infinity)
-                            .frame(height: 180)
-                            .clipped()
-                        }
-                        .padding(.horizontal)
-
-                        Spacer()
-                    }
-                    .toolbar {
-                        ToolbarItem(placement: .confirmationAction) {
-                            Button("Done") {
-                                isShowingMonthPicker = false
-                            }
-                        }
-                    }
-                }
-                .presentationDetents([.height(320), .medium])
-            }
-        .fileExporter(isPresented: $isExportingCSV,
-                          document: exportDocument,
-                          contentType: .commaSeparatedText,
-                          defaultFilename: csvFilename) { result in
-                switch result {
-                case .success:
-                    remoteSyncError = nil
-                case .failure(let error):
-                    remoteSyncError = error.localizedDescription
-                }
+        .sheet(isPresented: $isShowingSearchSheet) { searchSheet }
+        .sheet(isPresented: $isShowingMonthPicker) {
+            MonthYearPickerSheet(month: monthBinding,
+                                 year: yearBinding(options),
+                                 months: options.availableMonths(for: periodStore.selectedYear),
+                                 years: options.availableYears)
         }
+        .csvExporter(export)
         .onAppear {
-            if !hasAttemptedInitialSync {
-                hasAttemptedInitialSync = true
-                invoices = archive.invoices
-                ensurePeriodSelectionIsValid()
-                Task { await synchronizeWithRemoteIfPossible() }
-            } else {
-                ensurePeriodSelectionIsValid()
-            }
+            clampPeriodSelection(options)
+            guard !hasAttemptedInitialSync else { return }
+            hasAttemptedInitialSync = true
+            Task { await synchronizeWithRemoteIfPossible() }
         }
-        .onChange(of: invoices) { _, newValue in
-            if archive.invoices != newValue {
-                archive.update(with: newValue)
-            }
-        }
-        .onReceive(archive.$invoices) { updated in
-            if updated != invoices {
-                invoices = updated
-                ensurePeriodSelectionIsValid()
-            }
+        .onChange(of: archive.invoices.count) { _, _ in
+            clampPeriodSelection(ReportingPeriodOptions(dates: archive.invoices.map(\.date)))
         }
         .onChange(of: driveConnector.state) { _, newState in
-            if newState == .linked {
-                Task { await synchronizeWithRemoteIfPossible() }
-            }
-        }
-    }
-}
-
-private let csvDateFormatter: DateFormatter = {
-    let formatter = DateFormatter()
-    formatter.dateFormat = "yyyy-MM-dd"
-    return formatter
-}()
-
-/// Lightweight document wrapper for exporting filtered invoices as CSV.
-struct CSVDocument: FileDocument {
-    static var readableContentTypes: [UTType] { [.commaSeparatedText] }
-    static var writableContentTypes: [UTType] { [.commaSeparatedText] }
-
-    var text: String
-
-    init(text: String) {
-        self.text = text
-    }
-
-    init(configuration: ReadConfiguration) throws {
-        if let data = configuration.file.regularFileContents,
-           let string = String(data: data, encoding: .utf8) {
-            text = string
-        } else {
-            throw CocoaError(.fileReadCorruptFile)
+            guard newState == .linked else { return }
+            Task { await synchronizeWithRemoteIfPossible() }
         }
     }
 
-    func fileWrapper(configuration: WriteConfiguration) throws -> FileWrapper {
-        let data = text.data(using: .utf8) ?? Data()
-        return .init(regularFileWithContents: data)
-    }
-}
+    // MARK: - Content
 
-extension InvoiceTabView {
-    private var filtersActive: Bool {
-        !searchText.trimmingCharacters(in: .whitespaces).isEmpty ||
-        selectedCategory != nil
-    }
+    private var emptyState: some View {
+        VStack(spacing: 24) {
+            Image(systemName: "doc.text.magnifyingglass")
+                .font(.system(size: 68))
+                .foregroundStyle(.blue)
 
-    /// Applies search text, category, and period filtering to the archive.
-    private var filteredInvoices: [CapturedInvoice] {
-        invoices.filter { invoice in
-            let matchesSearch: Bool
-            let trimmedSearch = searchText.trimmingCharacters(in: .whitespaces)
-            if trimmedSearch.isEmpty {
-                matchesSearch = true
-            } else {
-                matchesSearch = invoice.supplier.range(of: trimmedSearch, options: .caseInsensitive) != nil
-            }
+            Text("Capture your invoices or enter details manually to prepare them for processing.")
+                .font(.title3)
+                .multilineTextAlignment(.center)
+                .foregroundStyle(.secondary)
+                .padding(.horizontal)
 
-            let matchesCategory: Bool
-            if let selectedCategory {
-                matchesCategory = invoice.category?.caseInsensitiveCompare(selectedCategory) == .orderedSame
-            } else {
-                matchesCategory = true
-            }
-
-            let invoiceComponents = Calendar.current.dateComponents([.year, .month], from: invoice.date)
-            let matchesDate = invoiceComponents.year == periodStore.selectedYear &&
-                              invoiceComponents.month == periodStore.selectedMonth
-
-            return matchesSearch && matchesCategory && matchesDate
+            Spacer()
         }
-        .sorted { $0.date > $1.date }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(Color.invoiceBackground)
     }
 
-    private func clearFilters() {
-        searchText = ""
-        selectedCategory = nil
-    }
+    private func invoiceList(_ invoices: [CapturedInvoice]) -> some View {
+        ZStack(alignment: .bottomTrailing) {
+            List {
+                if let linkIssue = driveConnector.linkIssueMessage {
+                    Section { linkIssueRow(linkIssue) }
+                }
 
-    private func binding(for invoice: CapturedInvoice) -> Binding<CapturedInvoice>? {
-        guard let index = invoices.firstIndex(where: { $0.id == invoice.id }) else { return nil }
-        return $invoices[index]
-    }
+                WarningSection(remoteSyncError ?? export.errorMessage)
 
-    private func startCSVExport() {
-        let invoicesToExport = filteredInvoices
-        guard !invoicesToExport.isEmpty else { return }
+                filterSection
 
-        let csvContent = makeCSV(from: invoicesToExport)
-        exportDocument = CSVDocument(text: csvContent)
-        isExportingCSV = true
-
-        let filename = csvFilename
-        Task { await uploadCSVToDrive(content: csvContent, filename: filename) }
-    }
-
-    private var csvFilenameBase: String {
-        let formatter = DateFormatter()
-        formatter.dateFormat = "yyyyMMdd-HHmm"
-        return "Invoices-\(formatter.string(from: Date()))"
-    }
-
-    /// Default export filename combining filters and current date.
-    private var csvFilename: String {
-        "\(csvFilenameBase).csv"
-    }
-
-    private func makeCSV(from invoices: [CapturedInvoice]) -> String {
-        var rows: [[String]] = [[
-            "Date",
-            "Supplier",
-            "Total Amount",
-            "Our Amount",
-            "GST",
-            "Category"
-        ]]
-
-        for invoice in invoices {
-            rows.append([
-                csvDateFormatter.string(from: invoice.date),
-                invoice.supplier,
-                invoice.total.plainString,
-                invoice.ourAmount.plainString,
-                invoice.gst.plainString,
-                invoice.category ?? ""
-            ])
-        }
-
-        let totalsRow = [
-            "",
-            "TOTAL",
-            invoices.reduce(Decimal.zero) { $0 + $1.total }.plainString,
-            invoices.reduce(Decimal.zero) { $0 + $1.ourAmount }.plainString,
-            invoices.reduce(Decimal.zero) { $0 + $1.gst }.plainString,
-            ""
-        ]
-        rows.append(totalsRow)
-
-        return CSVExporting.makeCSV(from: rows)
-    }
-
-    private func uploadCSVToDrive(content: String, filename: String) async {
-        let transferService = await MainActor.run { driveConnector.transferService }
-        let state = await MainActor.run { driveConnector.state }
-        guard state == .linked else { return }
-
-        do {
-            try await CSVExporting.uploadToDrive(content: content,
-                                                 filename: filename,
-                                                 transferService: transferService)
-            await MainActor.run { remoteSyncError = nil }
-        } catch {
-            await MainActor.run {
-                remoteSyncError = error.localizedDescription
-            }
-        }
-    }
-
-    private func removeInvoice(_ invoice: CapturedInvoice) {
-        guard let index = invoices.firstIndex(where: { $0.id == invoice.id }) else { return }
-        _ = withAnimation {
-            invoices.remove(at: index)
-        }
-    }
-
-    private func synchronizeWithRemoteIfPossible() async {
-        guard !isRemoteSyncing else { return }
-        guard driveConnector.state == .linked else { return }
-
-        isRemoteSyncing = true
-        remoteSyncError = nil
-        do {
-            let didChange = try await appEnvironment.remoteSynchronizer.synchronizeFromRemote()
-            if didChange {
-                let updated = archive.invoices
-                if updated != invoices {
-                    invoices = updated
+                Section("Invoices") {
+                    if invoices.isEmpty {
+                        Text("No invoices match your filters.")
+                            .foregroundStyle(.secondary)
+                    } else {
+                        ForEach(invoices) { invoice in
+                            NavigationLink {
+                                InvoiceDetailView(invoice: binding(for: invoice),
+                                                  onDelete: { archive.remove(id: $0.id) })
+                            } label: {
+                                CapturedInvoiceRow(invoice: invoice,
+                                                   isSynced: archive.syncedInvoiceIDs.contains(invoice.id))
+                            }
+                        }
+                    }
                 }
             }
-        } catch {
-            remoteSyncError = error.localizedDescription
+            .listStyle(.insetGrouped)
+
+            searchButton
         }
-        isRemoteSyncing = false
     }
 
-    /// Filters out invoices by search text, category, and period.
+    private func linkIssueRow(_ message: String) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Label(message, systemImage: "exclamationmark.triangle.fill")
+                .foregroundStyle(.orange)
+                .font(.footnote)
+                .multilineTextAlignment(.leading)
+
+            switch driveConnector.state {
+            case .signedOut:
+                Button {
+                    Task { await driveConnector.linkAccount() }
+                } label: {
+                    Label("Relink Google Drive", systemImage: "link")
+                        .font(.footnote)
+                }
+                .buttonStyle(.borderless)
+            case .failed:
+                Button {
+                    driveConnector.refreshLinkState()
+                } label: {
+                    Label("Retry Connection Check", systemImage: "arrow.clockwise")
+                        .font(.footnote)
+                }
+                .buttonStyle(.borderless)
+            case .linked, .authorizing:
+                EmptyView()
+            }
+        }
+        .padding(.vertical, 4)
+    }
+
+    private var searchButton: some View {
+        Button {
+            isShowingSearchSheet.toggle()
+        } label: {
+            HStack(spacing: 6) {
+                if searchText.isEmpty {
+                    Image(systemName: "magnifyingglass")
+                        .font(.headline)
+                } else {
+                    Text(searchText)
+                        .font(.caption)
+                        .lineLimit(1)
+                }
+            }
+            .padding(.horizontal, searchText.isEmpty ? 14 : 16)
+            .padding(.vertical, 12)
+            .background(Color.blue.opacity(0.9))
+            .foregroundStyle(.white)
+            .clipShape(Capsule())
+            .shadow(radius: 4)
+        }
+        .padding()
+        .accessibilityLabel("Search invoices")
+    }
+
+    private var searchSheet: some View {
+        NavigationStack {
+            Form {
+                Section("Supplier") {
+                    TextField("Enter supplier name", text: $searchText)
+                        .textInputAutocapitalization(.words)
+                        .autocorrectionDisabled()
+                }
+            }
+            .navigationTitle("Search")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Clear") {
+                        searchText = ""
+                        isShowingSearchSheet = false
+                    }
+                }
+
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Done") { isShowingSearchSheet = false }
+                }
+            }
+        }
+    }
+
     private var filterSection: some View {
         Section {
             VStack(alignment: .leading, spacing: 12) {
@@ -490,37 +235,26 @@ extension InvoiceTabView {
                             Button(category) { selectedCategory = category }
                         }
                     } label: {
-                        HStack {
-                            Text(selectedCategory ?? "All Categories")
-                                .lineLimit(1)
-                            Image(systemName: "chevron.up.chevron.down")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                        }
-                        .padding(.vertical, 6)
-                        .padding(.horizontal, 10)
-                        .background(Color.secondary.opacity(0.1))
-                        .clipShape(RoundedRectangle(cornerRadius: 8))
+                        filterChip(label: selectedCategory ?? "All Categories",
+                                   systemImage: nil,
+                                   trailingImage: "chevron.up.chevron.down")
                     }
 
                     Button {
                         isShowingMonthPicker = true
                     } label: {
-                        HStack(spacing: 6) {
-                            Image(systemName: "calendar")
-                            Text(selectedPeriodLabel)
-                                .lineLimit(1)
-                        }
-                        .padding(.vertical, 6)
-                        .padding(.horizontal, 10)
-                        .background(Color.secondary.opacity(0.1))
-                        .clipShape(RoundedRectangle(cornerRadius: 8))
+                        filterChip(label: selectedPeriodLabel,
+                                   systemImage: "calendar",
+                                   trailingImage: nil)
                     }
                     .buttonStyle(.plain)
                 }
 
                 if filtersActive {
-                    Button(action: clearFilters) {
+                    Button {
+                        searchText = ""
+                        selectedCategory = nil
+                    } label: {
                         Text("Clear Filters")
                             .font(.caption)
                             .padding(.vertical, 4)
@@ -536,90 +270,105 @@ extension InvoiceTabView {
         }
     }
 
-    private var selectedPeriodLabel: String {
-        "\(shortMonthName(for: periodStore.selectedMonth))-\(periodStore.selectedYear)"
+    private func filterChip(label: String, systemImage: String?, trailingImage: String?) -> some View {
+        HStack(spacing: 6) {
+            if let systemImage {
+                Image(systemName: systemImage)
+            }
+            Text(label)
+                .lineLimit(1)
+            if let trailingImage {
+                Image(systemName: trailingImage)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .padding(.vertical, 6)
+        .padding(.horizontal, 10)
+        .background(Color.secondary.opacity(0.1))
+        .clipShape(RoundedRectangle(cornerRadius: 8))
+    }
+}
+
+// MARK: - Filtering and period selection
+
+private extension InvoiceTabView {
+    var filtersActive: Bool {
+        !searchText.trimmed.isEmpty || selectedCategory != nil
     }
 
-    private var availableYears: [Int] {
-        var years = Set(invoices.map { Calendar.current.component(.year, from: $0.date) })
-        years.insert(currentYear)
-        return years.filter { $0 <= currentYear }.sorted()
+    var selectedPeriodLabel: String {
+        "\(ReportingDateFormatter.shortName(for: periodStore.selectedMonth))-\(periodStore.selectedYear)"
     }
 
-    private var availableMonths: [Int] {
-        availableMonths(for: periodStore.selectedYear)
-    }
-
-    private func availableMonths(for year: Int) -> [Int] {
+    /// Applies search text, category, and period filtering to the archive.
+    var filteredInvoices: [CapturedInvoice] {
         let calendar = Calendar.current
-        var months = Set(invoices
-            .filter { calendar.component(.year, from: $0.date) == year }
-            .map { calendar.component(.month, from: $0.date) })
-
-        if year == currentYear {
-            months.formUnion(1...currentMonth)
-        } else if year < currentYear {
-            months.formUnion(1...12)
+        guard let range = calendar.reportingMonth(month: periodStore.selectedMonth,
+                                                  year: periodStore.selectedYear) else {
+            return []
         }
+        let search = searchText.trimmed
 
-        if months.isEmpty {
-            if year == currentYear {
-                months.formUnion(1...currentMonth)
-            } else {
-                months.formUnion(1...12)
+        return archive.invoices
+            .filter { invoice in
+                guard calendar.isDay(invoice.date, in: range) else { return false }
+                if let selectedCategory,
+                   invoice.category?.matchesIgnoringCase(selectedCategory) != true {
+                    return false
+                }
+                return search.isEmpty || invoice.supplier.range(of: search, options: .caseInsensitive) != nil
             }
+            .sorted { $0.date > $1.date }
+    }
+
+    /// Two-way binding into the archive so edits made in the detail view are stored.
+    func binding(for invoice: CapturedInvoice) -> Binding<CapturedInvoice> {
+        Binding(get: { archive.invoice(with: invoice.id) ?? invoice },
+                set: { archive.upsert($0) })
+    }
+
+    var monthBinding: Binding<Int> {
+        Binding(get: { periodStore.selectedMonth },
+                set: { periodStore.set(month: $0, year: periodStore.selectedYear) })
+    }
+
+    /// Changing the year may leave the month unselectable, so clamp as part of the set.
+    func yearBinding(_ options: ReportingPeriodOptions) -> Binding<Int> {
+        Binding(get: { periodStore.selectedYear },
+                set: { year in
+                    let clamped = options.clamped(month: periodStore.selectedMonth, year: year)
+                    periodStore.set(month: clamped.month, year: clamped.year)
+                })
+    }
+
+    func clampPeriodSelection(_ options: ReportingPeriodOptions) {
+        let clamped = options.clamped(month: periodStore.selectedMonth, year: periodStore.selectedYear)
+        periodStore.set(month: clamped.month, year: clamped.year)
+    }
+}
+
+// MARK: - Export and remote sync
+
+private extension InvoiceTabView {
+    func startCSVExport(_ invoices: [CapturedInvoice]) {
+        guard !invoices.isEmpty else { return }
+        export.export(rows: CSVExporting.invoiceRows(from: invoices),
+                      filename: "Invoices-\(ReportingDateFormatter.fileNameTimestamp(Date())).csv",
+                      mirroringTo: driveConnector)
+    }
+
+    func synchronizeWithRemoteIfPossible() async {
+        guard !isRemoteSyncing, driveConnector.state == .linked else { return }
+
+        isRemoteSyncing = true
+        remoteSyncError = nil
+        defer { isRemoteSyncing = false }
+
+        do {
+            try await appEnvironment.remoteSynchronizer.synchronizeFromRemote()
+        } catch {
+            remoteSyncError = error.userFacingDescription
         }
-
-        return months.sorted()
     }
-
-    private func monthName(for month: Int) -> String {
-        guard month >= 1 && month <= Self.monthSymbols.count else { return "Month" }
-        return Self.monthSymbols[month - 1]
-    }
-
-    private func shortMonthName(for month: Int) -> String {
-        guard month >= 1 && month <= Self.shortMonthSymbols.count else { return "Mon" }
-        return Self.shortMonthSymbols[month - 1]
-    }
-
-    private func ensurePeriodSelectionIsValid() {
-        let years = availableYears
-        var targetYear = periodStore.selectedYear
-        if !years.contains(targetYear), let replacement = years.last {
-            targetYear = replacement
-        }
-
-        let months = availableMonths(for: targetYear)
-        guard !months.isEmpty else { return }
-
-        var targetMonth = periodStore.selectedMonth
-        if !months.contains(targetMonth) {
-            if targetYear == currentYear {
-                targetMonth = months.last ?? targetMonth
-            } else {
-                targetMonth = months.first ?? targetMonth
-            }
-        }
-
-        periodStore.set(month: targetMonth, year: targetYear)
-    }
-
-    private var currentYear: Int {
-        Calendar.current.component(.year, from: Date())
-    }
-
-    private var currentMonth: Int {
-        Calendar.current.component(.month, from: Date())
-    }
-
-    private static let monthSymbols: [String] = {
-        let formatter = DateFormatter()
-        return formatter.monthSymbols ?? []
-    }()
-
-    private static let shortMonthSymbols: [String] = {
-        let formatter = DateFormatter()
-        return formatter.shortMonthSymbols ?? []
-    }()
 }

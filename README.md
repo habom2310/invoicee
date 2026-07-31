@@ -1,46 +1,74 @@
 # Invoicee
 
-Modernised SwiftUI invoicing app with modular services and feature-focused views.
+SwiftUI invoicing app: capture invoices by camera, photo, PDF, or by hand; sync attachments
+to Google Drive and metadata to Firestore; report on expenses, revenue, and profit.
+
+Requires iOS 18. Swift 5 language mode with `SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor`.
 
 ## Project Structure
 
-- `Invoicee/App` – app entry point and dependency container (`AppEnvironment`).
-- `Invoicee/Domain` – domain models, stores, and persistence helpers (e.g. `CapturedInvoice`, `InvoiceArchive`, `LocalInvoiceStore`).
-- `Invoicee/Services` – Google Drive + Firebase syncing and supporting actors (`GoogleDriveConnector`, `GoogleDriveSyncCoordinator`, `InvoiceSyncTracker`).
-- `Invoicee/UI` – feature-specific SwiftUI views (Invoice, Expense, Profile) and reusable components.
-- `Invoicee/Utilities` – shared extensions and formatting utilities (`NumberFormatter.invoiceCurrency`, `ReportingDateFormatter`).
-- `Invoicee/Docs` – architecture notes, testing guide, and contributor documentation.
-- `InvoiceeTests` – unit tests for persistence, sync retry, and analytics aggregation.
+- `Invoicee/App` – app entry point, tab bar, and the dependency container (`AppEnvironment`).
+- `Invoicee/Domain` – domain models, stores, persistence, and the GST rate
+  (`CapturedInvoice`, `InvoiceArchive`, `LocalInvoiceStore`, `GSTRate`).
+- `Invoicee/Services` – Google Drive + Firestore syncing, OCR, and revenue caching.
+- `Invoicee/UI` – one folder per tab, each holding its view and view model, plus shared
+  `Components`.
+- `Invoicee/Utilities` – shared extensions, formatters, imaging, and logging.
+- `Invoicee/Docs` – `ARCHITECTURE.md` (real module map and concurrency rules) and
+  `TESTING.md`.
+
+See `Invoicee/Docs/ARCHITECTURE.md` for the dependency graph and the list of deliberately
+`nonisolated` types.
 
 ## Dependencies
 
-- Google Drive API (custom OAUTH flow via `GoogleDriveTransferService`).
-- Firebase Firestore (`InvoiceFirestoreUploader`), gated by `#if canImport(FirebaseFirestore)`.
-- SwiftUI & Combine for state management.
+- Google Drive API via a hand-rolled OAuth flow in `GoogleDriveTransferService`.
+- Firebase Firestore (`InvoiceFirestoreUploader`, `RevenueFirestoreStore`), gated by
+  `#if canImport(FirebaseFirestore)`.
+- SwiftUI + Combine for state management. No third-party packages beyond Firebase.
 
-## Development Workflow
+## How it runs
 
-1. Launch `InvoiceeApp` – `AppEnvironment.makeDefault()` wires all services without relying on singletons.
-2. Invoices persist to `Application Support/Invoicee/invoices.json` via `LocalInvoiceStore`.
-3. Google Drive auto-sync is scheduled through `GoogleDriveConnector`, which delegates uploads to `GoogleDriveSyncCoordinator` and records status in `InvoiceSyncTracker`.
-4. Firebase updates are abstracted behind the `InvoiceFirestoreUploading` protocol.
-5. Expense analytics pulls data from `InvoiceArchive` and derives category/supplier totals inside `ExpenseAnalyticsViewModel`.
+1. `InvoiceeApp` builds the graph with `AppEnvironment.makeDefault()` and injects the
+   shared stores via `View.invoiceeEnvironment(_:)`.
+2. Invoices persist to `Application Support/Invoicee/invoices.json` through
+   `LocalInvoiceStore`, whose writes are serialised by an actor and sequence-tagged so a
+   slow encode cannot clobber a newer snapshot.
+3. `GoogleDriveConnector` verifies the stored session ~5s after launch, pulls remote
+   invoices in, then schedules uploads. Auto-sync debounces 1s and backs off to a 60s
+   ceiling over at most 5 attempts.
+4. `InvoiceSyncTracker` (an actor) records what has been uploaded and under which file
+   name; it is the only source of truth for "is this invoice synced".
+5. Each reporting tab's view model subscribes to `InvoiceArchive` and publishes finished
+   figures — views never aggregate inside `body`.
+
+## Setup
+
+1. **Google Drive** – register an iOS OAuth client in the Google Cloud Console and update
+   `GoogleDriveTransferService.Constants.clientID` / `redirectURI`. Register the redirect
+   scheme (`ha.Invoicee`) under URL Types in the target's Info settings. The connector
+   creates and manages the `Invoicee/<yyyy>/<MM>/` folder tree itself.
+2. **Firebase** – add `GoogleService-Info.plist` to the app target and enable Firestore.
+   Without it the app still builds and runs; the sync paths throw
+   `FirestoreUnavailableError`.
+
+### Known gaps
+
+- The OAuth flow does not use PKCE or a `state` parameter. For a public client on a custom
+  URL scheme, both are worth adding.
+- GST is computed as if amounts were GST-exclusive. See the note at the end of
+  `Docs/ARCHITECTURE.md`.
 
 ## Testing
 
-1. Add a new **Unit Testing Bundle** target in Xcode and drop in the `InvoiceeTests` folder.
-2. Run `⌘U` or `xcodebuild test -scheme Invoicee -destination "platform=iOS Simulator,name=iPhone 15"`.
-3. Refer to `Docs/TESTING.md` for current coverage and outstanding gaps.
-
-## Sync Setup
-
-1. Register the app in Google Cloud Console and update `GoogleDriveTransferService.Constants` with client ID + redirect URI.
-2. Create the `Invoicee` folder in Drive; the connector will manage year/month subfolders automatically.
-3. Configure Firebase by adding `GoogleService-Info.plist` and enabling Firestore (see `InvoiceFirestoreUploader`).
+There is no test target yet, and nothing is verified automatically. `Docs/TESTING.md` lists
+how to add one and which logic is most worth covering first.
 
 ## Contributing
 
-- Follow the architecture described in `Docs/ARCHITECTURE.md`.
-- Reuse the dependency container instead of introducing new singletons.
-- Prefer adding utilities under `Invoicee/Utilities` with doc comments.
-- Keep feature views inside their respective `UI/<Feature>` folders.
+- Follow `Docs/ARCHITECTURE.md`; update it in the same change when the structure moves.
+- Use `AppEnvironment` rather than introducing singletons.
+- Mark pure helpers `nonisolated`, and keep expensive work (OCR, rasterising, resizing,
+  file writes) off the main actor.
+- Put a feature's view and view model together under `UI/<Feature>/`.
+- Comments should explain *why*, especially where a non-obvious ordering or guard exists.

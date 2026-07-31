@@ -1,8 +1,11 @@
-import Foundation
-internal import SwiftUI
+import CoreGraphics
 
 /// Configures how invoice images are resized prior to upload.
-enum InvoiceImageQuality: String, CaseIterable, Identifiable {
+///
+/// `nonisolated` because `InvoiceDriveExporter` reads `targetLongestSide` while resizing
+/// off the main actor. Without it, `SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor` infers
+/// `@MainActor` for these members and the read becomes a cross-isolation access.
+nonisolated enum InvoiceImageQuality: String, CaseIterable, Identifiable {
     case medium
     case large
     case actual
@@ -11,28 +14,26 @@ enum InvoiceImageQuality: String, CaseIterable, Identifiable {
 
     var displayName: String {
         switch self {
-        case .medium: return "Medium"
-        case .large: return "Large"
-        case .actual: return "Actual Size"
+        case .medium: "Medium"
+        case .large: "Large"
+        case .actual: "Actual Size"
         }
     }
 
     var description: String {
         switch self {
-        case .medium:
-            return "Longest side resized to 640 px before upload."
-        case .large:
-            return "Longest side resized to 1280 px before upload."
-        case .actual:
-            return "Uploads the original resolution."
+        case .medium: "Longest side resized to 640 px before upload."
+        case .large: "Longest side resized to 1280 px before upload."
+        case .actual: "Uploads the original resolution."
         }
     }
 
+    /// The longest side to resize to, or `nil` to upload unchanged.
     var targetLongestSide: CGFloat? {
         switch self {
-        case .medium: return 640
-        case .large: return 1280
-        case .actual: return nil
+        case .medium: 640
+        case .large: 1280
+        case .actual: nil
         }
     }
 }

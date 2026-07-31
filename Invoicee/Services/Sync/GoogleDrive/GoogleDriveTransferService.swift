@@ -2,42 +2,7 @@ import Foundation
 #if canImport(AuthenticationServices)
 import AuthenticationServices
 #endif
-#if canImport(os)
-import os.log
-#endif
 import Security
-
-#if canImport(os)
-private enum DriveLog {
-    static let logger = Logger(subsystem: "ha.Invoicee", category: "GoogleDrive")
-
-    static func debug(_ message: String) {
-        logger.debug("\(message, privacy: .public)")
-    }
-
-    static func info(_ message: String) {
-        logger.log("\(message, privacy: .public)")
-    }
-
-    static func error(_ message: String) {
-        logger.error("\(message, privacy: .public)")
-    }
-}
-#else
-private enum DriveLog {
-    static func debug(_ message: String) {
-        print("[GoogleDrive][DEBUG] \(message)")
-    }
-
-    static func info(_ message: String) {
-        print("[GoogleDrive][INFO] \(message)")
-    }
-
-    static func error(_ message: String) {
-        print("[GoogleDrive][ERROR] \(message)")
-    }
-}
-#endif
 
 /// Drive-specific implementation of `CloudStorageTransferService`.
 final class GoogleDriveTransferService: NSObject, CloudStorageTransferService {
@@ -58,12 +23,15 @@ final class GoogleDriveTransferService: NSObject, CloudStorageTransferService {
             scopes.joined(separator: " ")
         }
         static let maxRefreshAttempts = 3
+        static let folderMimeType = "application/vnd.google-apps.folder"
     }
 
     private let credentialStore = GoogleDriveCredentialStore()
-    private var token: OAuthToken? = nil
+    private var token: OAuthToken?
     private(set) var userProfile: GoogleUserProfile?
-    var lastErrorDescription: String?
+    private(set) var lastFailureDescription: String?
+    /// Resolved folder IDs keyed by parent + name. The parent must be part of the key:
+    /// month folders are named "01"…"12" and would otherwise collide across years.
     private var folderCache: [String: String] = [:]
     private var consecutiveRefreshFailures = 0
 
@@ -84,7 +52,7 @@ final class GoogleDriveTransferService: NSObject, CloudStorageTransferService {
         guard let credentials = credentialStore.loadCredentials() else { return }
         token = credentials.token
         userProfile = credentials.profile
-        DriveLog.debug("Restored cached credentials. Token present: \(token != nil), user id: \(userProfile?.id ?? "nil")")
+        AppLog.drive.debug("Restored cached credentials. Token present: \(token != nil), user id: \(userProfile?.id ?? "nil")")
     }
 
     func currentAuthorizationState() -> GoogleDriveAuthorizationState {
@@ -92,17 +60,17 @@ final class GoogleDriveTransferService: NSObject, CloudStorageTransferService {
     }
 
     func performHealthCheck() async -> GoogleDriveAuthorizationState {
-        DriveLog.info("Performing Google Drive health check.")
+        AppLog.drive.info("Performing Google Drive health check.")
         guard token != nil else {
             userProfile = nil
-            DriveLog.debug("No cached token during health check; reporting signed out.")
+            AppLog.drive.debug("No cached token during health check; reporting signed out.")
             return .signedOut
         }
 
         do {
             try await refreshTokenIfNeeded()
             guard let token else {
-                DriveLog.debug("Token missing after refresh; reporting signed out.")
+                AppLog.drive.debug("Token missing after refresh; reporting signed out.")
                 return .signedOut
             }
 
@@ -115,19 +83,19 @@ final class GoogleDriveTransferService: NSObject, CloudStorageTransferService {
             userProfile = profile
             credentialStore.save(token: token, profile: profile)
             _ = try await ensureRootFolderExists()
-            lastErrorDescription = nil
-            DriveLog.info("Health check succeeded for user \(profile.id).")
+            lastFailureDescription = nil
+            AppLog.drive.info("Health check succeeded for user \(profile.id).")
             return .linked
         } catch {
             let isUnauthorized = self.isUnauthorized(error: error)
             if isUnauthorized {
                 resetCredentials()
-                lastErrorDescription = "Google Drive link expired. Please relink your account."
-                DriveLog.error("Health check detected expired credentials: \(error.localizedDescription)")
+                lastFailureDescription = "Google Drive link expired. Please relink your account."
+                AppLog.drive.error("Health check detected expired credentials: \(error.localizedDescription)")
                 return .signedOut
             } else {
-                lastErrorDescription = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
-                DriveLog.error("Health check failed: \(error.localizedDescription)")
+                lastFailureDescription = error.userFacingDescription
+                AppLog.drive.error("Health check failed: \(error.localizedDescription)")
                 return .failed
             }
         }
@@ -137,46 +105,50 @@ final class GoogleDriveTransferService: NSObject, CloudStorageTransferService {
         do {
             let authURL = try authorizationRequestURL()
 #if canImport(AuthenticationServices)
-            DriveLog.info("Starting Google Drive authorization flow.")
+            AppLog.drive.info("Starting Google Drive authorization flow.")
             let callbackURL = try await performAuthorizationSession(url: authURL)
             try await completeAuthorization(callbackURL: callbackURL)
             folderCache.removeAll()
-            DriveLog.info("Google Drive authorization completed.")
+            AppLog.drive.info("Google Drive authorization completed.")
 #else
             let error = AuthorizationError.platformUnsupported
-            lastErrorDescription = error.localizedDescription
+            lastFailureDescription = error.localizedDescription
             throw error
 #endif
         } catch {
-            if lastErrorDescription == nil {
-                lastErrorDescription = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+            if lastFailureDescription == nil {
+                lastFailureDescription = error.userFacingDescription
             }
-            DriveLog.error("Google Drive authorization failed: \(error.localizedDescription)")
+            AppLog.drive.error("Google Drive authorization failed: \(error.localizedDescription)")
             throw error
         }
     }
 
     func disconnect() {
-        lastErrorDescription = nil
+        lastFailureDescription = nil
         resetCredentials()
-        DriveLog.info("Disconnected Google Drive and cleared local cache.")
+        AppLog.drive.info("Disconnected Google Drive and cleared local cache.")
     }
 
     func relocateFileIfNeeded(from existingPath: String, to metadata: DriveUploadMetadata) async throws {
         guard token != nil else { throw AuthorizationError.notAuthorized }
         guard let parsed = DrivePathComponents(path: existingPath) else { return }
 
-        folderCache.removeValue(forKey: parsed.baseFolderName)
-        folderCache.removeValue(forKey: parsed.yearFolderName)
-        folderCache.removeValue(forKey: parsed.monthFolderName)
+        AppLog.drive.debug("Relocating Drive file from \(existingPath) to \(metadata.fileName).")
 
-        DriveLog.debug("Relocating Drive file from \(existingPath) to \(metadata.fileName).")
-        let baseFolderID = try await ensureFolder(named: parsed.baseFolderName, parentID: "root")
-        let oldYearFolderID = try await ensureFolder(named: parsed.yearFolderName, parentID: baseFolderID)
-        let oldMonthFolderID = try await ensureFolder(named: parsed.monthFolderName, parentID: oldYearFolderID)
+        // Locate, never `ensure`: the old path is somewhere the file *used* to be. Using
+        // `ensureFolder` here created the old year/month folders whenever they were
+        // already gone — so renaming an invoice's supplier left a trail of empty
+        // `Invoicee/2025/07/`-style folders in the user's Drive.
+        guard let oldMonthFolderID = try await findFolderPath([parsed.baseFolderName,
+                                                              parsed.yearFolderName,
+                                                              parsed.monthFolderName]) else {
+            AppLog.drive.debug("Old Drive folder for \(existingPath) no longer exists; skipping relocation.")
+            return
+        }
 
         guard let existingFileID = try await findFile(named: parsed.fileName, inParent: oldMonthFolderID) else {
-            DriveLog.debug("Existing Drive file not found at path \(existingPath); skipping relocation.")
+            AppLog.drive.debug("Existing Drive file not found at path \(existingPath); skipping relocation.")
             return
         }
 
@@ -190,87 +162,79 @@ final class GoogleDriveTransferService: NSObject, CloudStorageTransferService {
                              newName: metadata.fileName,
                              oldParent: needsMove ? oldMonthFolderID : nil,
                              newParent: needsMove ? newMonthFolderID : nil)
-        DriveLog.debug("Drive file \(existingFileID) relocated. move: \(needsMove), rename: \(needsRename)")
+        AppLog.drive.debug("Drive file \(existingFileID) relocated. move: \(needsMove), rename: \(needsRename)")
     }
 
-    func ensureFolder(named name: String) async throws {
+    /// Creates the app's root folder if needed. Year/month subfolders are created lazily
+    /// by the upload path, which knows the invoice date.
+    func ensureRootFolder() async throws {
         guard token != nil else {
             let error = AuthorizationError.notAuthorized
-            lastErrorDescription = error.localizedDescription
-            DriveLog.error("Attempted to ensure folder '\(name)' without authorization.")
+            lastFailureDescription = error.localizedDescription
+            AppLog.drive.error("Attempted to ensure the Drive root folder without authorization.")
             throw error
         }
-
-        if folderCache[name] != nil { return }
-
-        let rootFolderID = try await ensureRootFolderExists()
-        let yearFolderID = try await ensureFolder(named: yearFolderName(for: Date()), parentID: rootFolderID)
-        folderCache[yearFolderName(for: Date())] = yearFolderID
-
-        let monthFolderID = try await ensureFolder(named: monthFolderName(for: Date()), parentID: yearFolderID)
-        folderCache[monthFolderName(for: Date())] = monthFolderID
-
-        if folderCache[name] == nil {
-            folderCache[name] = rootFolderID
-        }
+        _ = try await ensureRootFolderExists()
     }
 
     func upload(fileURL: URL, metadata: DriveUploadMetadata) async throws {
         guard token != nil else {
-            DriveLog.error("Attempted to upload \(metadata.fileName) without authorization.")
+            AppLog.drive.error("Attempted to upload \(metadata.fileName) without authorization.")
             throw AuthorizationError.notAuthorized
         }
         let folderID = try await ensureFolderHierarchy(for: metadata)
         let fileID = try await findFile(named: metadata.fileName, inParent: folderID)
         if let existingFileID = fileID {
             try await deleteFile(withID: existingFileID)
-            DriveLog.debug("Deleted existing Drive file before upload: \(metadata.fileName)")
+            AppLog.drive.debug("Deleted existing Drive file before upload: \(metadata.fileName)")
         }
         try await uploadFile(fileURL: fileURL, fileName: metadata.fileName, mimeType: metadata.mimeType, parentID: folderID)
-        DriveLog.info("Uploaded invoice image to Drive: \(metadata.fileName)")
+        AppLog.drive.info("Uploaded invoice image to Drive: \(metadata.fileName)")
     }
 
     func uploadExport(fileURL: URL, fileName: String) async throws {
         guard token != nil else {
-            DriveLog.error("Attempted to upload export \(fileName) without authorization.")
+            AppLog.drive.error("Attempted to upload export \(fileName) without authorization.")
             throw AuthorizationError.notAuthorized
         }
         let rootFolderID = try await ensureRootFolderExists()
         try await uploadFile(fileURL: fileURL, fileName: fileName, mimeType: "text/csv", parentID: rootFolderID)
-        DriveLog.info("Uploaded export file to Drive: \(fileName)")
+        AppLog.drive.info("Uploaded export file to Drive: \(fileName)")
     }
 
     func downloadInvoiceImage(fileName: String, invoiceDate: Date) async throws -> Data {
         guard token != nil else {
-            DriveLog.error("Attempted to download \(fileName) without authorization.")
+            AppLog.drive.error("Attempted to download \(fileName) without authorization.")
             throw AuthorizationError.notAuthorized
         }
-        let folderID = try await ensureFolderHierarchy(for: DriveUploadMetadata(invoiceDate: invoiceDate,
-                                                                                supplier: "",
-                                                                                baseFolderName: Constants.defaultFolderName,
-                                                                                fileExtension: (fileName as NSString).pathExtension,
-                                                                                increment: 0))
+        let folderID = try await attachmentFolderID(fileName: fileName, invoiceDate: invoiceDate)
         guard let fileID = try await findFile(named: fileName, inParent: folderID) else {
-            DriveLog.error("Requested invoice image \(fileName) not found in Drive.")
+            AppLog.drive.error("Requested invoice image \(fileName) not found in Drive.")
             throw DriveServiceError.apiError(code: 404, message: "Invoice image not found.")
         }
-        DriveLog.debug("Downloading invoice image \(fileName) from Drive.")
+        AppLog.drive.debug("Downloading invoice image \(fileName) from Drive.")
         return try await downloadFileData(withID: fileID)
     }
 
     func deleteInvoiceImage(fileName: String, invoiceDate: Date) async throws {
         guard token != nil else {
-            DriveLog.error("Attempted to delete \(fileName) without authorization.")
+            AppLog.drive.error("Attempted to delete \(fileName) without authorization.")
             throw AuthorizationError.notAuthorized
         }
-        let folderID = try await ensureFolderHierarchy(for: DriveUploadMetadata(invoiceDate: invoiceDate,
-                                                                                supplier: "",
-                                                                                baseFolderName: Constants.defaultFolderName,
-                                                                                fileExtension: (fileName as NSString).pathExtension,
-                                                                                increment: 0))
+        let folderID = try await attachmentFolderID(fileName: fileName, invoiceDate: invoiceDate)
         guard let fileID = try await findFile(named: fileName, inParent: folderID) else { return }
         try await deleteFile(withID: fileID)
-        DriveLog.debug("Deleted invoice image \(fileName) from Drive.")
+        AppLog.drive.debug("Deleted invoice image \(fileName) from Drive.")
+    }
+
+    /// Resolves the year/month folder an existing attachment lives in.
+    private func attachmentFolderID(fileName: String, invoiceDate: Date) async throws -> String {
+        let metadata = DriveUploadMetadata(invoiceDate: invoiceDate,
+                                          supplier: "",
+                                          baseFolderName: Constants.defaultFolderName,
+                                          fileExtension: (fileName as NSString).pathExtension,
+                                          increment: 0)
+        return try await ensureFolderHierarchy(for: metadata)
     }
 }
 
@@ -383,17 +347,29 @@ private extension GoogleDriveTransferService {
     }
 
     func refreshTokenIfNeeded() async throws {
+        try await refreshToken(force: false)
+    }
+
+    /// Exchanges the refresh token for a new access token.
+    /// - Parameter force: refresh even when the current token has not expired locally,
+    ///   used after the server has rejected it.
+    func refreshToken(force: Bool) async throws {
         guard let currentToken = token else {
             consecutiveRefreshFailures = 0
             return
         }
-        if !currentToken.isExpired {
+        if !force, !currentToken.isExpired {
             consecutiveRefreshFailures = 0
             return
         }
-        guard let refreshToken = currentToken.refreshToken else { return }
+        guard let refreshToken = currentToken.refreshToken else {
+            // Expired with no way to refresh: the session is over.
+            resetCredentials()
+            lastFailureDescription = "Google Drive session expired. Please relink your account."
+            throw AuthorizationError.notAuthorized
+        }
 
-        DriveLog.info("Refreshing Google Drive access token.")
+        AppLog.drive.info("Refreshing Google Drive access token.")
         var request = URLRequest(url: Constants.tokenEndpoint)
         request.httpMethod = "POST"
         let bodyParams: [String: String] = [
@@ -413,17 +389,16 @@ private extension GoogleDriveTransferService {
             self.token = refreshed
             credentialStore.save(token: refreshed, profile: userProfile)
             consecutiveRefreshFailures = 0
-            DriveLog.info("Google Drive token refreshed successfully.")
+            AppLog.drive.info("Google Drive token refreshed successfully.")
         } catch {
             consecutiveRefreshFailures += 1
-            DriveLog.error("Token refresh failed (attempt \(consecutiveRefreshFailures)): \(error.localizedDescription)")
+            AppLog.drive.error("Token refresh failed (attempt \(consecutiveRefreshFailures)): \(error.localizedDescription)")
             if consecutiveRefreshFailures >= Constants.maxRefreshAttempts {
-                DriveLog.error("Exceeded maximum token refresh attempts. Clearing credentials.")
+                AppLog.drive.error("Exceeded maximum token refresh attempts. Clearing credentials.")
                 resetCredentials()
-                lastErrorDescription = "Google Drive session expired. Please relink your account."
+                lastFailureDescription = "Google Drive session expired. Please relink your account."
                 throw AuthorizationError.notAuthorized
             }
-            try? await Task.sleep(nanoseconds: 3_000_000_000)
             throw error
         }
     }
@@ -433,57 +408,68 @@ private extension GoogleDriveTransferService {
 
 private extension GoogleDriveTransferService {
     func ensureRootFolderExists() async throws -> String {
-        guard token != nil else { throw AuthorizationError.notAuthorized }
-
-        if let cached = folderCache[Constants.defaultFolderName] {
-            return cached
-        }
-
-        if let existingFolderID = try await findFolder(named: Constants.defaultFolderName, inParent: "root") {
-            folderCache[Constants.defaultFolderName] = existingFolderID
-            return existingFolderID
-        }
-
-        let folderID = try await createFolder(named: Constants.defaultFolderName, parentID: "root")
-        folderCache[Constants.defaultFolderName] = folderID
-        return folderID
+        try await ensureFolder(named: Constants.defaultFolderName, parentID: "root")
     }
 
     func ensureFolder(named name: String, parentID: String) async throws -> String {
-        if let cached = folderCache[name] {
+        guard token != nil else { throw AuthorizationError.notAuthorized }
+
+        let cacheKey = "\(parentID)/\(name)"
+        if let cached = folderCache[cacheKey] {
             return cached
         }
 
-        if let existingFolderID = try await findFolder(named: name, inParent: parentID) {
-            folderCache[name] = existingFolderID
-            return existingFolderID
+        let folderID: String
+        if let existing = try await findFolder(named: name, inParent: parentID) {
+            folderID = existing
+        } else {
+            folderID = try await createFolder(named: name, parentID: parentID)
         }
-
-        let folderID = try await createFolder(named: name, parentID: parentID)
-        folderCache[name] = folderID
+        folderCache[cacheKey] = folderID
         return folderID
     }
 
+    /// Ensures `base/yyyy/MM` exists and returns the month folder's ID.
     func ensureFolderHierarchy(for metadata: DriveUploadMetadata) async throws -> String {
-        let rootFolderID: String
-        if metadata.baseFolderName == Constants.defaultFolderName {
-            rootFolderID = try await ensureRootFolderExists()
-        } else if let cached = folderCache[metadata.baseFolderName] {
-            rootFolderID = cached
-        } else {
-            let baseID = try await ensureFolder(named: metadata.baseFolderName, parentID: "root")
-            folderCache[metadata.baseFolderName] = baseID
-            rootFolderID = baseID
+        var parentID = "root"
+        for name in [metadata.baseFolderName, metadata.yearFolderName, metadata.monthFolderName] {
+            parentID = try await ensureFolder(named: name, parentID: parentID)
         }
-        let yearFolderID = try await ensureFolder(named: metadata.yearFolderName, parentID: rootFolderID)
-        let monthFolderID = try await ensureFolder(named: metadata.monthFolderName, parentID: yearFolderID)
-        return monthFolderID
+        return parentID
+    }
+
+    /// Walks `names` down from the Drive root without creating anything.
+    /// - Returns: the last folder's ID, or `nil` as soon as a level is missing.
+    func findFolderPath(_ names: [String]) async throws -> String? {
+        guard token != nil else { throw AuthorizationError.notAuthorized }
+
+        var parentID = "root"
+        for name in names {
+            let cacheKey = "\(parentID)/\(name)"
+            if let cached = folderCache[cacheKey] {
+                parentID = cached
+                continue
+            }
+            guard let found = try await findFolder(named: name, inParent: parentID) else { return nil }
+            folderCache[cacheKey] = found
+            parentID = found
+        }
+        return parentID
     }
 }
 
 // MARK: - Network Helpers
 
 private extension GoogleDriveTransferService {
+    /// Sends a Drive API request, refreshing an expired token first and retrying once if
+    /// the server rejects the token anyway.
+    ///
+    /// The retry matters: `refreshTokenIfNeeded` only acts when the token is *locally*
+    /// known to be expired, so a token revoked or rotated server-side still looked valid.
+    /// A single 401 then wiped the keychain outright, signing the user out even though the
+    /// refresh token was perfectly good — and, mid-sync, stranding the remaining
+    /// invoices. Now the refresh token gets its chance first, and credentials are only
+    /// cleared when a freshly-minted access token is *also* rejected.
     func performRequest(_ request: URLRequest,
                         injectAuthorizationHeader: Bool = true,
                         allowRefresh: Bool = true) async throws -> Data {
@@ -491,143 +477,141 @@ private extension GoogleDriveTransferService {
             try await refreshTokenIfNeeded()
         }
 
+        let response = try await send(request, injectAuthorizationHeader: injectAuthorizationHeader)
+        guard response.statusCode == 401, allowRefresh else {
+            return try validate(response)
+        }
+
+        AppLog.drive.info("Drive request unauthorized (401); forcing a token refresh before giving up.")
+        do {
+            try await refreshToken(force: true)
+        } catch {
+            AppLog.drive.error("Forced token refresh after 401 failed: \(error.localizedDescription)")
+            return try validate(response)
+        }
+
+        let retried = try await send(request, injectAuthorizationHeader: injectAuthorizationHeader)
+        if retried.statusCode == 401 {
+            resetCredentials()
+            AppLog.drive.error("Drive still unauthorized after refresh. Cleared credentials. Request: \(retried.description)")
+        }
+        return try validate(retried)
+    }
+
+    /// One round trip, with the bearer token attached after any refresh so it is never stale.
+    func send(_ request: URLRequest, injectAuthorizationHeader: Bool) async throws -> DriveResponse {
         var request = request
         if injectAuthorizationHeader, let token {
             request.setValue("Bearer \(token.accessToken)", forHTTPHeaderField: "Authorization")
         }
 
-        let requestDescription = "\(request.httpMethod ?? "GET") \(request.url?.absoluteString ?? "<unknown>")"
-        DriveLog.debug("Drive request: \(requestDescription)")
+        let description = "\(request.httpMethod ?? "GET") \(request.url?.absoluteString ?? "<unknown>")"
+        AppLog.drive.debug("Drive request: \(description)")
 
         let (data, response) = try await URLSession.shared.data(for: request)
-
         guard let httpResponse = response as? HTTPURLResponse else {
-            DriveLog.error("Drive request returned non-HTTP response.")
+            AppLog.drive.error("Drive request returned non-HTTP response.")
             throw DriveServiceError.invalidResponse
         }
+        return DriveResponse(data: data, statusCode: httpResponse.statusCode, description: description)
+    }
 
-        if httpResponse.statusCode == 401 {
-            resetCredentials()
-            DriveLog.error("Drive request unauthorized (401). Cleared credentials. Request: \(requestDescription)")
-        }
-
-        guard (200..<300).contains(httpResponse.statusCode) else {
-            if let driveError = try? JSONDecoder().decode(DriveAPIErrorResponse.self, from: data) {
-                DriveLog.error("Drive API error \(driveError.error.code) for \(requestDescription): \(driveError.error.message)")
+    /// Returns the body for a success, or throws the most specific error available.
+    func validate(_ response: DriveResponse) throws -> Data {
+        guard (200..<300).contains(response.statusCode) else {
+            if let driveError = try? JSONDecoder().decode(DriveAPIErrorResponse.self, from: response.data) {
+                AppLog.drive.error("Drive API error \(driveError.error.code) for \(response.description): \(driveError.error.message)")
                 throw DriveServiceError.apiError(code: driveError.error.code, message: driveError.error.message)
             }
-            DriveLog.error("Drive HTTP error \(httpResponse.statusCode) for \(requestDescription).")
-            throw DriveServiceError.httpError(statusCode: httpResponse.statusCode)
+            AppLog.drive.error("Drive HTTP error \(response.statusCode) for \(response.description).")
+            throw DriveServiceError.httpError(statusCode: response.statusCode)
         }
 
-        DriveLog.debug("Drive request succeeded with status \(httpResponse.statusCode) for \(requestDescription).")
-        return data
+        AppLog.drive.debug("Drive request succeeded with status \(response.statusCode) for \(response.description).")
+        return response.data
+    }
+
+    /// Builds a request for the Drive API. The bearer token is attached by
+    /// `performRequest` *after* any refresh, so it is never stale.
+    func driveRequest(_ url: URL, method: String = "GET") throws -> URLRequest {
+        guard token != nil else { throw AuthorizationError.notAuthorized }
+        var request = URLRequest(url: url)
+        request.httpMethod = method
+        return request
+    }
+
+    /// Escapes a value for interpolation into a Drive `q` query string.
+    static func escapeQueryValue(_ value: String) -> String {
+        value
+            .replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "'", with: "\\'")
+    }
+
+    func searchURL(query: String) -> URL {
+        var components = URLComponents(string: "https://www.googleapis.com/drive/v3/files")!
+        components.queryItems = [
+            URLQueryItem(name: "q", value: query),
+            URLQueryItem(name: "spaces", value: "drive"),
+            URLQueryItem(name: "fields", value: "files(id,name)"),
+            URLQueryItem(name: "pageSize", value: "1")
+        ]
+        return components.url!
+    }
+
+    /// Finds the first non-trashed match for `name` in `parentID`.
+    func findEntry(named name: String, inParent parentID: String, mimeType: String? = nil) async throws -> String? {
+        var clauses = [
+            "name='\(Self.escapeQueryValue(name))'",
+            "'\(Self.escapeQueryValue(parentID))' in parents",
+            "trashed=false"
+        ]
+        if let mimeType {
+            clauses.insert("mimeType='\(Self.escapeQueryValue(mimeType))'", at: 1)
+        }
+
+        let request = try driveRequest(searchURL(query: clauses.joined(separator: " and ")))
+        let data = try await performRequest(request)
+        let response = try JSONDecoder().decode(DriveFileListResponse.self, from: data)
+        return response.files?.first?.id
     }
 
     func findFolder(named name: String, inParent parentID: String) async throws -> String? {
-        guard let token else { throw AuthorizationError.notAuthorized }
-
-        let queryName = name.replacingOccurrences(of: "'", with: "\'")
-        let queryParent = parentID.replacingOccurrences(of: "'", with: "\'")
-        let query = "name='\(queryName)' and mimeType='application/vnd.google-apps.folder' and '\(queryParent)' in parents and trashed=false"
-
-        var components = URLComponents(string: "https://www.googleapis.com/drive/v3/files")!
-        components.queryItems = [
-            URLQueryItem(name: "q", value: query),
-            URLQueryItem(name: "spaces", value: "drive"),
-            URLQueryItem(name: "fields", value: "files(id,name)"),
-            URLQueryItem(name: "pageSize", value: "1")
-        ]
-
-        var request = URLRequest(url: components.url!)
-        request.httpMethod = "GET"
-        request.setValue("Bearer \(token.accessToken)", forHTTPHeaderField: "Authorization")
-
-        let data = try await performRequest(request)
-        let response = try JSONDecoder().decode(DriveFileListResponse.self, from: data)
-        return response.files?.first?.id
-    }
-
-    func createFolder(named name: String, parentID: String) async throws -> String {
-        guard let token else { throw AuthorizationError.notAuthorized }
-
-        var request = URLRequest(url: URL(string: "https://www.googleapis.com/drive/v3/files?fields=id")!)
-        request.httpMethod = "POST"
-        request.setValue("Bearer \(token.accessToken)", forHTTPHeaderField: "Authorization")
-        request.setValue("application/json; charset=UTF-8", forHTTPHeaderField: "Content-Type")
-
-        let payload = DriveCreateFolderPayload(name: name, parents: [parentID])
-        request.httpBody = try JSONEncoder().encode(payload)
-
-        DriveLog.debug("Creating Drive folder '\(name)' under parent \(parentID).")
-        let data = try await performRequest(request)
-        let driveFile = try JSONDecoder().decode(DriveFileResponse.self, from: data)
-        DriveLog.debug("Created Drive folder '\(name)' with id \(driveFile.id).")
-        return driveFile.id
+        try await findEntry(named: name, inParent: parentID, mimeType: Constants.folderMimeType)
     }
 
     func findFile(named name: String, inParent parentID: String) async throws -> String? {
-        guard let token else { throw AuthorizationError.notAuthorized }
+        let id = try await findEntry(named: name, inParent: parentID)
+        AppLog.drive.debug("Drive file '\(name)' in parent \(parentID): \(id ?? "not found").")
+        return id
+    }
 
-        let queryName = name.replacingOccurrences(of: "'", with: "\'")
-        let queryParent = parentID.replacingOccurrences(of: "'", with: "\'")
-        let query = "name='\(queryName)' and '\(queryParent)' in parents and trashed=false"
+    func createFolder(named name: String, parentID: String) async throws -> String {
+        var request = try driveRequest(URL(string: "https://www.googleapis.com/drive/v3/files?fields=id")!,
+                                      method: "POST")
+        request.setValue("application/json; charset=UTF-8", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try JSONEncoder().encode(DriveCreateFolderPayload(name: name, parents: [parentID]))
 
-        var components = URLComponents(string: "https://www.googleapis.com/drive/v3/files")!
-        components.queryItems = [
-            URLQueryItem(name: "q", value: query),
-            URLQueryItem(name: "spaces", value: "drive"),
-            URLQueryItem(name: "fields", value: "files(id,name)"),
-            URLQueryItem(name: "pageSize", value: "1")
-        ]
-
-        var request = URLRequest(url: components.url!)
-        request.httpMethod = "GET"
-        request.setValue("Bearer \(token.accessToken)", forHTTPHeaderField: "Authorization")
-
+        AppLog.drive.debug("Creating Drive folder '\(name)' under parent \(parentID).")
         let data = try await performRequest(request)
-        let response = try JSONDecoder().decode(DriveFileListResponse.self, from: data)
-        if let id = response.files?.first?.id {
-            DriveLog.debug("Found Drive file '\(name)' in parent \(parentID) with id \(id).")
-        } else {
-            DriveLog.debug("Drive file '\(name)' not found in parent \(parentID).")
-        }
-        return response.files?.first?.id
+        let driveFile = try JSONDecoder().decode(DriveFileResponse.self, from: data)
+        AppLog.drive.debug("Created Drive folder '\(name)' with id \(driveFile.id).")
+        return driveFile.id
     }
 
     func deleteFile(withID fileID: String) async throws {
-        guard let token else { throw AuthorizationError.notAuthorized }
-        var request = URLRequest(url: URL(string: "https://www.googleapis.com/drive/v3/files/\(fileID)")!)
-        request.httpMethod = "DELETE"
-        request.setValue("Bearer \(token.accessToken)", forHTTPHeaderField: "Authorization")
+        let request = try driveRequest(URL(string: "https://www.googleapis.com/drive/v3/files/\(fileID)")!,
+                                      method: "DELETE")
         _ = try await performRequest(request)
-        DriveLog.debug("Deleted Drive file with id \(fileID).")
+        AppLog.drive.debug("Deleted Drive file with id \(fileID).")
     }
 
     func downloadFileData(withID fileID: String) async throws -> Data {
-        guard let token else { throw AuthorizationError.notAuthorized }
-        let url = URL(string: "https://www.googleapis.com/drive/v3/files/\(fileID)?alt=media")!
-        var request = URLRequest(url: url)
-        request.httpMethod = "GET"
-        request.setValue("Bearer \(token.accessToken)", forHTTPHeaderField: "Authorization")
-        DriveLog.debug("Downloading Drive file data for id \(fileID).")
+        let request = try driveRequest(URL(string: "https://www.googleapis.com/drive/v3/files/\(fileID)?alt=media")!)
+        AppLog.drive.debug("Downloading Drive file data for id \(fileID).")
         return try await performRequest(request)
     }
 
-    func yearFolderName(for date: Date) -> String {
-        let components = Calendar(identifier: .gregorian).dateComponents([.year], from: date)
-        let yearValue = components.year ?? 0
-        return String(format: "%04d", yearValue)
-    }
-
-    func monthFolderName(for date: Date) -> String {
-        let components = Calendar(identifier: .gregorian).dateComponents([.month], from: date)
-        let monthValue = components.month ?? 0
-        return String(format: "%02d", monthValue)
-    }
-
     func uploadFile(fileURL: URL, fileName: String, mimeType: String, parentID: String) async throws {
-        guard let token else { throw AuthorizationError.notAuthorized }
         let metadata = DriveFileMetadata(name: fileName, parents: [parentID])
         let metadataData = try JSONEncoder().encode(metadata)
         let fileData = try Data(contentsOf: fileURL)
@@ -649,9 +633,7 @@ private extension GoogleDriveTransferService {
             URLQueryItem(name: "fields", value: "id")
         ]
 
-        var request = URLRequest(url: components.url!)
-        request.httpMethod = "POST"
-        request.setValue("Bearer \(token.accessToken)", forHTTPHeaderField: "Authorization")
+        var request = try driveRequest(components.url!, method: "POST")
         request.setValue("multipart/related; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
         request.httpBody = body
 
@@ -659,11 +641,8 @@ private extension GoogleDriveTransferService {
     }
 
     func updateFile(fileID: String, newName: String, oldParent: String?, newParent: String?) async throws {
-        guard let token else { throw AuthorizationError.notAuthorized }
-
-        var request = URLRequest(url: URL(string: "https://www.googleapis.com/drive/v3/files/\(fileID)")!)
-        request.httpMethod = "PATCH"
-        request.setValue("Bearer \(token.accessToken)", forHTTPHeaderField: "Authorization")
+        var request = try driveRequest(URL(string: "https://www.googleapis.com/drive/v3/files/\(fileID)")!,
+                                      method: "PATCH")
         request.setValue("application/json; charset=UTF-8", forHTTPHeaderField: "Content-Type")
 
         let payload = DriveFileUpdatePayload(name: newName,
@@ -671,7 +650,7 @@ private extension GoogleDriveTransferService {
                                              removeParents: oldParent)
         request.httpBody = try JSONEncoder().encode(payload)
 
-        DriveLog.debug("Updating Drive file \(fileID). rename=\(newName), addParent=\(newParent ?? "nil"), removeParent=\(oldParent ?? "nil")")
+        AppLog.drive.debug("Updating Drive file \(fileID). rename=\(newName), addParent=\(newParent ?? "nil"), removeParent=\(oldParent ?? "nil")")
         _ = try await performRequest(request)
     }
 }
@@ -755,7 +734,7 @@ private extension GoogleDriveTransferService {
         folderCache.removeAll()
         credentialStore.deleteCredentials()
         consecutiveRefreshFailures = 0
-        DriveLog.debug("Cleared Drive credentials and cache.")
+        AppLog.drive.debug("Cleared Drive credentials and cache.")
     }
 
     func isUnauthorized(error: Error) -> Bool {
@@ -786,7 +765,7 @@ private extension GoogleDriveTransferService {
 
 private struct DriveCreateFolderPayload: Encodable {
     let name: String
-    let mimeType: String = "application/vnd.google-apps.folder"
+    let mimeType = GoogleDriveTransferService.Constants.folderMimeType
     let parents: [String]
 }
 
@@ -795,6 +774,16 @@ private struct DriveFileMetadata: Encodable {
     let parents: [String]
 }
 
+/// One HTTP round trip's outcome, kept together so the 401 retry can inspect a response
+/// before deciding whether to turn it into an error.
+private struct DriveResponse {
+    let data: Data
+    let statusCode: Int
+    /// The request that produced it, for logging.
+    let description: String
+}
+
+/// Splits a recorded upload path — `<base>/<yyyy>/<MM>/<fileName>` — back into its parts.
 private struct DrivePathComponents {
     let baseFolderName: String
     let yearFolderName: String
@@ -803,11 +792,14 @@ private struct DrivePathComponents {
 
     init?(path: String) {
         let components = path.split(separator: "/").map(String.init)
-        guard components.count >= 4 else { return nil }
+        // Exactly four: the previous `>= 4` accepted longer paths but still read the base,
+        // year, and month from the first three components, so a nested path resolved to
+        // the wrong folder while claiming success.
+        guard components.count == 4 else { return nil }
         baseFolderName = components[0]
         yearFolderName = components[1]
         monthFolderName = components[2]
-        fileName = components.last!
+        fileName = components[3]
     }
 }
 
@@ -869,66 +861,50 @@ private struct GoogleDriveCredentialStore {
         query[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlock
         let status = SecItemAdd(query as CFDictionary, nil)
         if status != errSecSuccess {
-            #if DEBUG
-            print("Failed to save Google Drive credentials: \(status)")
-            #endif
+            AppLog.drive.error("Failed to save Google Drive credentials: OSStatus \(status)")
         }
     }
 
     func loadCredentials() -> GoogleDriveStoredCredentials? {
         var query = baseQuery()
         query[kSecReturnData as String] = true
+        // Matching all, not one: a bug in an earlier version could leave more than one
+        // item under this service/account pair, and the newest is the one to trust.
         query[kSecMatchLimit as String] = kSecMatchLimitAll
 
         var item: CFTypeRef?
-        let status = SecItemCopyMatching(query as CFDictionary, &item)
-        guard status == errSecSuccess else {
+        guard SecItemCopyMatching(query as CFDictionary, &item) == errSecSuccess else { return nil }
+
+        let decoder = JSONDecoder()
+        let decoded = Self.credentialData(from: item)
+            .compactMap { try? decoder.decode(GoogleDriveStoredCredentials.self, from: $0) }
+
+        guard let mostRecent = decoded.max(by: { $0.token.createdAt < $1.token.createdAt }) else {
             return nil
         }
 
-        let decoder = JSONDecoder()
-
-        let decoded: [GoogleDriveStoredCredentials]
-        if let data = item as? Data {
-            if let credentials = try? decoder.decode(GoogleDriveStoredCredentials.self, from: data) {
-                decoded = [credentials]
-            } else {
-                decoded = []
-            }
-        } else if let values = item as? [Any] {
-            let dataArray: [Data] = values.compactMap {
-                if let data = $0 as? Data { return data }
-                if let dict = $0 as? [String: Any], let data = dict[kSecValueData as String] as? Data { return data }
-                return nil
-            }
-            decoded = dataArray.compactMap { try? decoder.decode(GoogleDriveStoredCredentials.self, from: $0) }
-        } else {
-            decoded = []
-        }
-
-        guard !decoded.isEmpty else { return nil }
-
-        if decoded.count == 1 {
-            return decoded.first
-        }
-
-        let mostRecent = decoded.max { lhs, rhs in
-            lhs.token.createdAt < rhs.token.createdAt
-        }
-
-        if let mostRecent {
+        // Collapse duplicates back down to the one we just chose.
+        if decoded.count > 1 {
             save(token: mostRecent.token, profile: mostRecent.profile)
         }
-
         return mostRecent
+    }
+
+    /// `kSecMatchLimitAll` returns either a lone `Data` or an array of items, so both
+    /// shapes have to be unwrapped.
+    private static func credentialData(from item: CFTypeRef?) -> [Data] {
+        if let data = item as? Data { return [data] }
+        guard let values = item as? [Any] else { return [] }
+        return values.compactMap { value in
+            if let data = value as? Data { return data }
+            return (value as? [String: Any])?[kSecValueData as String] as? Data
+        }
     }
 
     func deleteCredentials() {
         let status = SecItemDelete(baseQuery() as CFDictionary)
-        if status != errSecSuccess && status != errSecItemNotFound {
-            #if DEBUG
-            print("Failed to delete Google Drive credentials: \(status)")
-            #endif
+        if status != errSecSuccess, status != errSecItemNotFound {
+            AppLog.drive.error("Failed to delete Google Drive credentials: OSStatus \(status)")
         }
     }
 

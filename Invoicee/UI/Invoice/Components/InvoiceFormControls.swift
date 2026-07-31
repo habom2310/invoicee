@@ -1,7 +1,8 @@
 internal import SwiftUI
 
+/// A small uppercase caption naming the field beneath it.
 struct InvoiceFieldLabel: View {
-    var text: String
+    let text: String
 
     init(_ text: String) {
         self.text = text
@@ -15,6 +16,7 @@ struct InvoiceFieldLabel: View {
     }
 }
 
+/// A "$"-prefixed field that only accepts digits.
 struct InvoiceCurrencyField: View {
     private let placeholder: String
     private let text: Binding<String>
@@ -28,13 +30,13 @@ struct InvoiceCurrencyField: View {
 
     var body: some View {
         HStack(spacing: 4) {
-            Text("$")
+            Text(verbatim: "$")
                 .foregroundStyle(.secondary)
+            // No `textContentType`: these fields previously declared `.oneTimeCode`,
+            // which made iOS offer SMS verification codes as autofill for an invoice
+            // amount and suppressed the keyboard's own suggestions.
             TextField(placeholder, text: text.enforcingNumeric(allowDecimal: allowDecimal))
-#if os(iOS)
                 .keyboardType(.decimalPad)
-                .textContentType(.oneTimeCode)
-#endif
         }
         .padding(.vertical, 6)
         .padding(.horizontal, 10)
@@ -54,6 +56,7 @@ private struct InvoiceInputStyle: ViewModifier {
 }
 
 extension View {
+    /// The shared boxed appearance for editable invoice fields.
     func invoiceInputStyle() -> some View {
         modifier(InvoiceInputStyle())
     }

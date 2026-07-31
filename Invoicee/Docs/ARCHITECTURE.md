@@ -1,87 +1,160 @@
-# Invoicee Architecture Blueprint
+# Invoicee Architecture
 
-This document captures the target structure that guides the ongoing refactor. It informs the dependency graph, ownership rules, and module boundaries introduced in this iteration.
+This describes the structure as it actually is. Keep it in step with the tree — an
+architecture doc that lists files which don't exist is worse than none.
 
 ## Core Principles
 
-- **Explicit lifecycle** – shared state (reporting period, invoice archive, sync tracker) lives inside a container object that we inject where needed. The runtime environment owns those instances and defines their lifespan.
-- **Service protocols** – UI and view models depend on lightweight protocols, making it easy to mock in tests and to transition implementations independently.
-- **Feature-first organization** – SwiftUI views, models, and helpers sit inside feature folders (Invoice, Expense, Profile) to keep each feature cohesive.
-- **Sync isolation** – Google Drive and Firebase concerns are separated from UI logic and rely on dedicated transfer/sync layers with documented behaviour.
-- **Documented utilities** – shared helpers (formatters, CSV, date utilities) move into namespaced extensions with doc comments to avoid ad-hoc duplication.
+- **Explicit lifecycle** – shared state (reporting period, invoice archive, sync tracker,
+  expense metric) lives in `AppEnvironment`, which owns the instances and defines their
+  lifespan. No singletons.
+- **Service protocols** – view models depend on protocols (`InvoicePersistence`,
+  `CloudStorageTransferService`, `RevenueStoring`, `InvoiceFirestoreUploading`,
+  `InvoiceSyncHost`) so implementations can be swapped or faked.
+- **Feature-first organization** – each tab's view and view model sit together under
+  `UI/<Feature>/`.
+- **Sync isolation** – Drive and Firebase concerns live under `Services/`; UI never talks
+  to either directly, except through the connector it is handed.
+- **Shared utilities, not copies** – formatting, money bindings, CSV, logging, and the
+  GST rate each have exactly one definition under `Utilities/` or `Domain/Tax/`.
 
 ## Module Overview
 
 ```
 Invoicee/
   App/
-    InvoiceeApp.swift
-    AppEnvironment.swift            # Dependency container & environment keys
+    InvoiceeApp.swift               # @main; Firebase configure; environment injection
+    ContentView.swift               # Tab bar
+    AppEnvironment.swift            # Composition root + view model factories
 
   Domain/
     Invoices/
       Models/
-        CapturedInvoice.swift       # Codable domain models with docstrings
-        ManualInvoiceItem.swift
+        CapturedInvoice.swift       # Invoice, ManualInvoiceData, ManualInvoiceItem
+        ExpenseMetric.swift         # Total vs Our Amount
+        ReportingPeriod.swift       # Week/Month/Year + Calendar range helper
       Stores/
-        InvoiceArchive.swift        # ObservableObject + persistence helpers
-        ReportingPeriodStore.swift  # Injected calendar, no singletons
+        InvoiceArchive.swift        # Single source of truth for invoices
+        InvoiceCategoryStore.swift  # Categories + supplier→category memory
+        ReportingPeriodStore.swift  # Shared month/year selection
+        ReportingPeriodOptions.swift# Which periods are selectable, and clamping
+        ExpenseMetricStore.swift    # Shared metric selection
       Persistence/
-        LocalInvoiceStore.swift     # JSON read/write
-        InvoiceSyncTracker.swift    # Actor tracking remote sync state
+        LocalInvoiceStore.swift     # JSON in Application Support, serialised by an actor
+        InvoiceSyncTracker.swift    # Actor: what has been uploaded, and as what name
+    Revenue/
+      RevenueModels.swift           # RevenueDayEntry, RevenueStreamValue
+    Tax/
+      GSTRate.swift                 # The only definition of the 10% rate
+      GSTValidator.swift            # Caps an implausible GST figure
 
   Services/
+    OCR/
+      InvoiceOCR.swift              # nonisolated Vision pass + document scanner view
+    Revenue/
+      RevenueSummaryProvider.swift  # Cached monthly revenue totals
+    Firebase/
+      InvoiceFirestoreUploader.swift
+      RevenueFirestoreStore.swift
     Sync/
+      InvoiceSyncHost.swift         # What the connector needs from the app
+      InvoiceRemoteSynchronizer.swift # Remote→local merge; the connector's host
       GoogleDrive/
-        GoogleDriveConnector.swift  # Auth/link lifecycle, queue management
-        GoogleDriveTransferService.swift
-        GoogleDriveMetadataService.swift
-        DriveUploadMetadata.swift
-      Firebase/
-        InvoiceFirestoreUploader.swift
-      InvoiceRemoteSynchronizer.swift
+        GoogleDriveConnector.swift  # Link lifecycle, auto-sync scheduling
+        GoogleDriveSyncCoordinator.swift # Per-invoice upload orchestration
+        GoogleDriveTransferService.swift # OAuth + Drive REST
+        CloudStorageTransferService.swift # The protocol the above satisfies
+        DriveUploadMetadata.swift   # Folder/file naming and parsing
+        InvoiceDriveExporter.swift  # Attachment → temp file, resized
+        InvoiceImageQuality.swift
+        GoogleDriveAuthorizationState.swift
 
   UI/
+    Components/
+      CSVExportController.swift     # Shared "build CSV → save sheet → mirror to Drive"
+      MonthYearPickerSheet.swift
+      ReportingControls.swift       # YearMenuButton, WarningSection
     Invoice/
       InvoiceTabView.swift
-      InvoiceListView.swift
-      InvoiceDetailView.swift
-      InvoiceCaptureControls.swift
+      InvoiceCaptureSheet.swift     # Camera / photo / PDF capture
+      InvoiceFormViews.swift        # ManualInvoiceFormView, InvoiceItemFields
+      Components/
+        CapturedInvoiceRow.swift
+        InvoiceFormControls.swift
+      Detail/
+        InvoiceDetailView.swift
     Expense/
       ExpenseTabView.swift
       ExpenseAnalyticsViewModel.swift
-      Charts/
-        ExpenseCategoryBarChart.swift
-        ExpenseSupplierBarChart.swift
-        ExpenseComparisonView.swift
+    Revenue/
+      RevenueTabView.swift
+      RevenueViewModel.swift
+    Profit/
+      ProfitTabView.swift
+      ProfitAnalyticsViewModel.swift
     Profile/
-      ProfileTabView.swift
+      ProfileTabView.swift          # + GoogleDriveSettingsView
 
   Utilities/
-    Extensions/
-      Decimal+InvoiceFormatting.swift
-      String+InvoiceTrimming.swift
-      Date+InvoiceFormatting.swift
-    Formatting/
-      NumberFormatter+Currency.swift
-    CSV/
-      ExpenseCSVExporter.swift
+    CSV/CSVExporting.swift
+    Extensions/                     # Binding+MoneyText, Calendar+ReportingPeriods,
+                                    # Color, Date, Decimal, Error+UserFacing, String
+    Formatting/                     # NumberFormatter+Currency, ReportingDateFormatter
+    Imaging/PDFPageRenderer.swift
+    Logging/AppLog.swift
 ```
 
 ## Dependency Injection
 
-- `AppEnvironment` constructs the concrete implementations and exposes them via `EnvironmentKey`s. SwiftUI views read them using `@Environment` or `@EnvironmentObject`.
-- `InvoiceArchive` accepts `InvoicePersistence` and `InvoiceSyncScheduling` protocols. The default implementation combines `LocalInvoiceStore` (JSON persistence) with the Drive sync scheduler.
-- `ExpenseAnalyticsViewModel` now receives `InvoiceArchive` and `ReportingPeriodStore` via injection, making it testable without global state.
+`AppEnvironment.makeDefault()` is the composition root. It builds the graph bottom-up and
+closes the one cycle explicitly:
 
-## Concurrency Notes
+```
+transferService → syncCoordinator → connector → invoiceArchive → remoteSynchronizer
+                                        ↑                              │
+                                        └──── connector.host = ────────┘
+```
 
-- Actors (`InvoiceSyncTracker`, async Drive transfer services) isolate mutable state.
-- Networking and persistence tasks run on background priorities and hop back to the main actor when updating UI-bound state.
+The connector needs the archive (to know what to upload); the archive's remote half needs
+the connector (to know whether Drive is linked). `InvoiceSyncHost` is that one back-edge,
+assigned once, held weakly. It replaced five separately-installed closures where a
+forgotten call produced a connector that looked healthy and synced nothing.
 
-## Documentation & Testing
+Views receive the stores through `@EnvironmentObject`, injected by
+`View.invoiceeEnvironment(_:)` so the list exists in one place.
 
-- README gets an updated "Architecture" section summarising these modules alongside setup steps for Drive/Firebase.
-- New tests target persistence (JSON round trips), sync retry logic, and analytics filtering by supplier/category.
+## Concurrency
 
-This structure informs the concrete refactor tasks that follow.
+The project sets `SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor`, so **everything is main-actor
+isolated unless marked `nonisolated`**. That default is right for the stores and view
+models and wrong for anything expensive, so the following are deliberately `nonisolated`:
+
+- `InvoiceOCRProcessor` – the Vision text pass; it blocked the UI for seconds.
+- `PDFPageRenderer` – page rasterisation.
+- `InvoiceDriveExporter` – image resizing and temp-file writes.
+- `CSVExporting`, `ReportingDateFormatter`, `NumberFormatter+Currency`,
+  `Decimal`/`String`/`Error`/`Calendar` extensions, `GSTRate`, `GSTValidator`,
+  `DriveUploadMetadata` – pure helpers, callable from any isolation.
+
+`InvoiceSyncTracker` and `LocalInvoiceStore`'s file writer are actors. The writer tags
+each snapshot with a sequence number so a slow encode cannot overwrite a newer one.
+
+## Reporting data flow
+
+`InvoiceArchive` publishes `invoices`. Each analytics view model subscribes, recomputes its
+aggregates once, and publishes the *finished* figures — including percentages. Views read
+published values and never aggregate in `body`, because `body` runs several times per
+update and each of those aggregations walks the whole archive.
+
+`ReportingPeriodStore` and `ExpenseMetricStore` let the tabs share a selection. The
+subscriptions are delivered on `RunLoop.main` so a picker change never publishes back into
+the middle of a view update.
+
+## Known issue: GST is treated as exclusive
+
+`GSTRate` documents this, but it is worth stating plainly: revenue totals and invoice
+totals are treated as **GST-exclusive** (GST = amount × 0.1). If the amounts users enter
+are GST-*inclusive*, as they are on most Australian receipts, GST should be amount ÷ 11 and
+the net should be amount × 10/11. `GSTRate.inclusiveGST(in:)` / `inclusiveNet(of:)` exist
+for that reading; switching is a per-call-site change in `GSTValidator`,
+`RevenueViewModel.summaryGST`, and `ProfitSummary.revenueNet`.

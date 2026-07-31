@@ -1,6 +1,7 @@
 import Foundation
 import Combine
 
+@MainActor
 protocol InvoicePersistence {
     func loadInvoices() -> [CapturedInvoice]
     func saveInvoices(_ invoices: [CapturedInvoice])
@@ -15,79 +16,98 @@ protocol InvoiceSyncStatusProvider {
 }
 
 /// Owns the local list of captured invoices and coordinates persistence + sync.
+///
+/// This is the single source of truth for invoices: views read `invoices` and mutate
+/// through `upsert`/`remove` rather than keeping their own copies.
 @MainActor
 final class InvoiceArchive: ObservableObject {
-    let objectWillChange = ObservableObjectPublisher()
     @Published private(set) var invoices: [CapturedInvoice]
+    /// Which invoices are known to be uploaded. Derived from `syncStatusProvider` — the
+    /// sync tracker is the only thing that decides this, so it is never stored here.
     @Published private(set) var syncedInvoiceIDs: Set<UUID> = []
-
-    private static let syncedIDsDefaultsKey = "invoicee.syncedInvoiceIDs"
-    private let defaults: UserDefaults
 
     private let persistence: InvoicePersistence
     private let syncScheduler: InvoiceAutoSyncScheduling
     private let syncStatusProvider: InvoiceSyncStatusProvider
+    private var syncStatusTask: Task<Void, Never>?
 
     init(persistence: InvoicePersistence,
          syncScheduler: InvoiceAutoSyncScheduling,
-         syncStatusProvider: InvoiceSyncStatusProvider,
-         defaults: UserDefaults = .standard) {
+         syncStatusProvider: InvoiceSyncStatusProvider) {
         self.persistence = persistence
         self.syncScheduler = syncScheduler
         self.syncStatusProvider = syncStatusProvider
-        self.defaults = defaults
 
-        let persistedInvoices = persistence.loadInvoices()
-        invoices = persistedInvoices
-        syncedInvoiceIDs = Self.loadSyncedIDs(from: defaults)
-            .intersection(Set(persistedInvoices.map(\.id)))
-        scheduleAutoSync(for: persistedInvoices)
-        refreshSyncedState(for: persistedInvoices)
+        let persisted = persistence.loadInvoices()
+        invoices = persisted
+        syncScheduler.enqueueAutoSync(with: persisted)
+        refreshSyncedState(for: persisted)
     }
 
+    deinit {
+        syncStatusTask?.cancel()
+    }
+
+    // MARK: - Reading
+
+    func invoice(with id: UUID) -> CapturedInvoice? {
+        invoices.first { $0.id == id }
+    }
+
+    // MARK: - Mutating
+
+    /// Replaces the whole archive, e.g. after a remote merge.
     func update(with invoices: [CapturedInvoice]) {
-        self.invoices = invoices
-        syncedInvoiceIDs = syncedInvoiceIDs.intersection(Set(invoices.map(\.id)))
-        persistSyncedIDs()
-        persistence.saveInvoices(invoices)
-        scheduleAutoSync(for: invoices)
-        refreshSyncedState(for: invoices)
+        guard invoices != self.invoices else { return }
+        apply(invoices)
     }
+
+    /// Inserts a new invoice, or replaces the stored copy of an existing one.
+    func upsert(_ invoice: CapturedInvoice) {
+        var updated = invoices
+        if let index = updated.firstIndex(where: { $0.id == invoice.id }) {
+            guard updated[index] != invoice else { return }
+            updated[index] = invoice
+        } else {
+            updated.insert(invoice, at: 0)
+        }
+        apply(updated)
+    }
+
+    func remove(id: UUID) {
+        let remaining = invoices.filter { $0.id != id }
+        guard remaining.count != invoices.count else { return }
+        apply(remaining)
+    }
+
+    func removeAll() {
+        guard !invoices.isEmpty else { return }
+        apply([])
+    }
+
+    // MARK: - Sync bookkeeping
 
     func refreshSyncStatus() {
         refreshSyncedState(for: invoices)
     }
 
-    func markInvoicesSynced(_ ids: [UUID]) {
-        guard !ids.isEmpty else { return }
-        syncedInvoiceIDs.formUnion(ids)
-        persistSyncedIDs()
-    }
+    // MARK: - Private
 
-    private func scheduleAutoSync(for invoices: [CapturedInvoice]) {
+    private func apply(_ invoices: [CapturedInvoice]) {
+        self.invoices = invoices
+        // Drop IDs that no longer exist immediately; the refresh below settles the rest.
+        syncedInvoiceIDs.formIntersection(invoices.lazy.map(\.id))
+        persistence.saveInvoices(invoices)
         syncScheduler.enqueueAutoSync(with: invoices)
+        refreshSyncedState(for: invoices)
     }
 
     private func refreshSyncedState(for invoices: [CapturedInvoice]) {
-        Task {
+        syncStatusTask?.cancel()
+        syncStatusTask = Task { [weak self, syncStatusProvider] in
             let synced = await syncStatusProvider.syncedInvoiceIDs(for: invoices)
-            await MainActor.run {
-                self.syncedInvoiceIDs = synced
-                self.persistSyncedIDs()
-            }
+            guard !Task.isCancelled, let self, synced != syncedInvoiceIDs else { return }
+            syncedInvoiceIDs = synced
         }
-    }
-
-    private func persistSyncedIDs() {
-        let ids = syncedInvoiceIDs.map(\.uuidString)
-        defaults.set(ids, forKey: Self.syncedIDsDefaultsKey)
-    }
-
-    private static func loadSyncedIDs(from defaults: UserDefaults) -> Set<UUID> {
-        guard let stored = defaults.array(forKey: syncedIDsDefaultsKey) as? [String] else {
-            return []
-        }
-        let uuids = stored.compactMap(UUID.init)
-        return Set(uuids)
     }
 }

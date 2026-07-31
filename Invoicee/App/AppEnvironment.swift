@@ -1,11 +1,13 @@
 import Foundation
-internal import SwiftUI
 import Combine
 
 /// Centralises dependency wiring for the Invoicee app.
+///
+/// Also owns the reporting view models. They used to be constructed by `ContentView`,
+/// which meant their lifetime was a SwiftUI implementation detail; holding them here
+/// keeps one instance each and lets the tabs stay value types.
 @MainActor
 final class AppEnvironment: ObservableObject {
-    let objectWillChange = ObservableObjectPublisher()
     let reportingPeriodStore: ReportingPeriodStore
     let invoiceArchive: InvoiceArchive
     let driveConnector: GoogleDriveConnector
@@ -15,6 +17,8 @@ final class AppEnvironment: ObservableObject {
     let categoryStore: InvoiceCategoryStore
     let revenueStore: RevenueStoring
     let revenueSummaryProvider: RevenueSummaryProviding
+    let expenseMetricStore: ExpenseMetricStore
+
     private var cancellables: Set<AnyCancellable> = []
 
     init(reportingPeriodStore: ReportingPeriodStore,
@@ -25,7 +29,8 @@ final class AppEnvironment: ObservableObject {
          syncTracker: InvoiceSyncTracker,
          categoryStore: InvoiceCategoryStore,
          revenueStore: RevenueStoring,
-         revenueSummaryProvider: RevenueSummaryProviding) {
+         revenueSummaryProvider: RevenueSummaryProviding,
+         expenseMetricStore: ExpenseMetricStore) {
         self.reportingPeriodStore = reportingPeriodStore
         self.invoiceArchive = invoiceArchive
         self.driveConnector = driveConnector
@@ -35,22 +40,45 @@ final class AppEnvironment: ObservableObject {
         self.categoryStore = categoryStore
         self.revenueStore = revenueStore
         self.revenueSummaryProvider = revenueSummaryProvider
+        self.expenseMetricStore = expenseMetricStore
 
         categoryStore.updateCategories(from: invoiceArchive.invoices)
+        // Delivered on the next run loop pass: `$invoices` fires during `willSet`, and
+        // republishing the category list from there lands in the middle of a view update.
         invoiceArchive.$invoices
-            .receive(on: DispatchQueue.main)
-            .sink { [weak self] invoices in
-                self?.categoryStore.updateCategories(from: invoices)
+            .dropFirst()
+            .receive(on: RunLoop.main)
+            .sink { [weak categoryStore] invoices in
+                categoryStore?.updateCategories(from: invoices)
             }
             .store(in: &cancellables)
     }
 
-    func makeDriveLinkViewModel() -> GoogleDriveLinkViewModel {
-        GoogleDriveLinkViewModel(connector: driveConnector, archive: invoiceArchive)
+    // MARK: - View models
+
+    func makeExpenseViewModel() -> ExpenseAnalyticsViewModel {
+        ExpenseAnalyticsViewModel(archive: invoiceArchive,
+                                  periodStore: reportingPeriodStore,
+                                  metricStore: expenseMetricStore,
+                                  revenueSummaryProvider: revenueSummaryProvider)
     }
 
+    func makeRevenueViewModel() -> RevenueViewModel {
+        RevenueViewModel(store: revenueStore,
+                         driveConnector: driveConnector,
+                         summaryProvider: revenueSummaryProvider)
+    }
+
+    func makeProfitViewModel() -> ProfitAnalyticsViewModel {
+        ProfitAnalyticsViewModel(invoiceArchive: invoiceArchive,
+                                 revenueStore: revenueStore,
+                                 driveConnector: driveConnector,
+                                 metricStore: expenseMetricStore)
+    }
+
+    // MARK: - Composition root
+
     static func makeDefault() -> AppEnvironment {
-        let reportingPeriodStore = ReportingPeriodStore()
         let syncTracker = InvoiceSyncTracker()
         let firestoreUploader = InvoiceFirestoreUploader()
         let transferService = GoogleDriveTransferService()
@@ -63,42 +91,24 @@ final class AppEnvironment: ObservableObject {
         let invoiceArchive = InvoiceArchive(persistence: LocalInvoiceStore(),
                                             syncScheduler: connector,
                                             syncStatusProvider: syncTracker)
-        connector.updateInvoicesProvider { [weak invoiceArchive] in
-            invoiceArchive?.invoices ?? []
-        }
-        connector.updateSyncStatusRefresh { [weak invoiceArchive] in
-            invoiceArchive?.refreshSyncStatus()
-        }
-        connector.configureArchiveHandlers(clearAll: { [weak invoiceArchive] in
-            invoiceArchive?.update(with: [])
-        }, removeInvoices: { [weak invoiceArchive] ids in
-            guard let archive = invoiceArchive else { return }
-            let remaining = archive.invoices.filter { !ids.contains($0.id) }
-            archive.update(with: remaining)
-        })
-        connector.updateSyncedRegistration { [weak invoiceArchive] ids in
-            invoiceArchive?.markInvoicesSynced(ids)
-        }
         let remoteSynchronizer = InvoiceRemoteSynchronizer(connector: connector,
                                                            archive: invoiceArchive,
                                                            firestoreUploader: firestoreUploader)
-        connector.updateRemoteFetcher { [weak remoteSynchronizer] in
-            guard let synchronizer = remoteSynchronizer else { return }
-            _ = try? await synchronizer.synchronizeFromRemote()
-        }
-        let categoryStore = InvoiceCategoryStore()
+        // The connector needs the archive, and the archive's remote half needs the
+        // connector to know whether Drive is linked, so the link is closed here.
+        connector.host = remoteSynchronizer
+
         let revenueStore = RevenueFirestoreStore()
-        let revenueSummaryProvider = RevenueSummaryProvider(store: revenueStore,
-                                                            driveConnector: connector)
-        let environment = AppEnvironment(reportingPeriodStore: reportingPeriodStore,
-                                         invoiceArchive: invoiceArchive,
-                                         driveConnector: connector,
-                                         firestoreUploader: firestoreUploader,
-                                         remoteSynchronizer: remoteSynchronizer,
-                                         syncTracker: syncTracker,
-                                         categoryStore: categoryStore,
-                                         revenueStore: revenueStore,
-                                         revenueSummaryProvider: revenueSummaryProvider)
-        return environment
+        return AppEnvironment(reportingPeriodStore: ReportingPeriodStore(),
+                              invoiceArchive: invoiceArchive,
+                              driveConnector: connector,
+                              firestoreUploader: firestoreUploader,
+                              remoteSynchronizer: remoteSynchronizer,
+                              syncTracker: syncTracker,
+                              categoryStore: InvoiceCategoryStore(),
+                              revenueStore: revenueStore,
+                              revenueSummaryProvider: RevenueSummaryProvider(store: revenueStore,
+                                                                            driveConnector: connector),
+                              expenseMetricStore: ExpenseMetricStore())
     }
 }

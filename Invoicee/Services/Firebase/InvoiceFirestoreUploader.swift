@@ -9,10 +9,17 @@ protocol InvoiceFirestoreUploading {
     func fetchInvoices(for userID: String) async throws -> [CapturedInvoice]
 }
 
+/// Raised when the app is built without Firestore, so the sync paths fail with a message
+/// instead of silently doing nothing.
+struct FirestoreUnavailableError: LocalizedError {
+    let errorDescription: String? = "Firebase Firestore is not available in this build."
+}
+
 /// Firebase-backed implementation of `InvoiceFirestoreUploading`.
 final class InvoiceFirestoreUploader: InvoiceFirestoreUploading {
-
 #if canImport(FirebaseFirestore)
+    private static let collectionName = "invoices"
+
     private let db: Firestore
 
     init(db: Firestore = Firestore.firestore()) {
@@ -20,142 +27,131 @@ final class InvoiceFirestoreUploader: InvoiceFirestoreUploading {
     }
 
     func upload(invoice: CapturedInvoice, imageFileName: String?, pdfFileName: String?, userID: String) async throws {
-        let document = db.collection("invoices").document(invoice.id.uuidString)
-        let data: [String: Any] = Self.payload(from: invoice,
-                                               imageFileName: imageFileName,
-                                               pdfFileName: pdfFileName,
-                                               userID: userID)
-        try await document.setData(data, merge: true)
+        try await document(for: invoice.id).setData(Self.payload(from: invoice,
+                                                                imageFileName: imageFileName,
+                                                                pdfFileName: pdfFileName,
+                                                                userID: userID),
+                                                    merge: true)
     }
 
     func delete(invoiceID: UUID) async throws {
-        let document = db.collection("invoices").document(invoiceID.uuidString)
-        try await document.delete()
+        try await document(for: invoiceID).delete()
     }
 
     func fetchInvoices(for userID: String) async throws -> [CapturedInvoice] {
-        let collection = db.collection("invoices")
-        let primary = try await collection
-            .whereField("driveAccountID", isEqualTo: userID)
-            .getDocuments()
+        let collection = db.collection(Self.collectionName)
+        var snapshot = try await collection.whereField("driveAccountID", isEqualTo: userID).getDocuments()
 
-        let snapshot: QuerySnapshot
-        if primary.isEmpty {
-            snapshot = try await collection
-                .whereField("userID", isEqualTo: userID)
-                .getDocuments()
-        } else {
-            snapshot = primary
+        // Invoices written before `driveAccountID` existed carry only `userID`. Current
+        // uploads set both, so this second query only runs for an account whose documents
+        // all predate that field — or one with no invoices at all.
+        if snapshot.isEmpty {
+            snapshot = try await collection.whereField("userID", isEqualTo: userID).getDocuments()
         }
 
-        return snapshot.documents.compactMap { document in
-            Self.invoice(from: document.data(), documentID: document.documentID)
+        return snapshot.documents.compactMap {
+            Self.invoice(from: $0.data(), documentID: $0.documentID)
         }
+    }
+
+    private func document(for invoiceID: UUID) -> DocumentReference {
+        db.collection(Self.collectionName).document(invoiceID.uuidString)
     }
 #else
     init() {}
 
     func upload(invoice: CapturedInvoice, imageFileName: String?, pdfFileName: String?, userID: String) async throws {
-        throw NSError(domain: "InvoiceFirestoreUploader", code: 0, userInfo: [NSLocalizedDescriptionKey: "FirebaseFirestore not available on this platform."])
+        throw FirestoreUnavailableError()
     }
 
     func delete(invoiceID: UUID) async throws {
-        throw NSError(domain: "InvoiceFirestoreUploader", code: 0, userInfo: [NSLocalizedDescriptionKey: "FirebaseFirestore not available on this platform."])
+        throw FirestoreUnavailableError()
     }
 
     func fetchInvoices(for userID: String) async throws -> [CapturedInvoice] {
-        throw NSError(domain: "InvoiceFirestoreUploader", code: 0, userInfo: [NSLocalizedDescriptionKey: "FirebaseFirestore not available on this platform."])
+        throw FirestoreUnavailableError()
     }
 #endif
+}
 
 #if canImport(FirebaseFirestore)
-    private static func payload(from invoice: CapturedInvoice,
-                                imageFileName: String?,
-                                pdfFileName: String?,
-                                userID: String) -> [String: Any] {
+private extension InvoiceFirestoreUploader {
+    static func payload(from invoice: CapturedInvoice,
+                        imageFileName: String?,
+                        pdfFileName: String?,
+                        userID: String) -> [String: Any] {
+        let resolvedImageFileName = imageFileName ?? invoice.remoteImageFileName
         let resolvedPDFFileName = pdfFileName ?? invoice.remotePDFFileName
-        let hasPdf = (invoice.pdfData != nil) || (resolvedPDFFileName != nil)
 
         var payload: [String: Any] = [
             "id": invoice.id.uuidString,
             "supplier": invoice.supplier,
-            "total": NSDecimalNumber(decimal: invoice.total).doubleValue,
-            "ourAmount": NSDecimalNumber(decimal: invoice.ourAmount).doubleValue,
-            "gst": NSDecimalNumber(decimal: invoice.gst).doubleValue,
+            "total": invoice.total.doubleValue,
+            "ourAmount": invoice.ourAmount.doubleValue,
+            "gst": invoice.gst.doubleValue,
             "date": Timestamp(date: invoice.date),
             "method": invoice.method.rawValue,
-            "category": invoice.category as Any,
             "hasImage": invoice.imageData != nil,
-            "imageFileName": (imageFileName ?? invoice.remoteImageFileName) as Any,
-            "hasPdf": hasPdf,
-            "pdfFileName": resolvedPDFFileName as Any,
+            "hasPdf": invoice.pdfData != nil || resolvedPDFFileName != nil,
             "lastEdited": Timestamp(date: invoice.lastEdited),
             "userID": userID,
             "driveAccountID": userID,
-            "last_updated": Timestamp(date: Date())
+            "last_updated": Timestamp(date: Date()),
+            "items": invoice.items.map { item in
+                [
+                    "id": item.id.uuidString,
+                    "name": item.name,
+                    "quantity": item.quantity,
+                    "unitPrice": item.unitPrice,
+                    "totalAmount": item.totalAmount
+                ]
+            }
         ]
 
-        let items = invoice.items.map { item -> [String: Any] in
-            [
-                "id": item.id.uuidString,
-                "name": item.name,
-                "quantity": item.quantity,
-                "unitPrice": item.unitPrice,
-                "totalAmount": item.totalAmount
-            ]
-        }
-        payload["items"] = items
+        // Written only when set. Casting `nil` through `as Any` — as this did for
+        // `category` and the file names — stores an `NSNull`, which reads back as a
+        // present-but-null field rather than an absent one.
+        payload["category"] = invoice.category
+        payload["imageFileName"] = resolvedImageFileName
+        payload["pdfFileName"] = resolvedPDFFileName
         return payload
     }
 
-    private static func invoice(from data: [String: Any], documentID: String) -> CapturedInvoice? {
-        guard let supplier = data["supplier"] as? String else { return nil }
+    static func invoice(from data: [String: Any], documentID: String) -> CapturedInvoice? {
+        guard let supplier = data["supplier"] as? String,
+              let timestamp = data["date"] as? Timestamp else { return nil }
 
-        let totalValue = (data["total"] as? Double) ?? (data["ourAmount"] as? Double)
-        guard let totalValue else { return nil }
-
-        let ourAmountValue = (data["ourAmount"] as? Double) ?? totalValue
-        let gstValue = data["gst"] as? Double ?? 0
-
-        guard let timestamp = data["date"] as? Timestamp else { return nil }
+        // Older documents recorded only `ourAmount`.
+        guard let total = (data["total"] as? Double) ?? (data["ourAmount"] as? Double) else { return nil }
+        let ourAmount = (data["ourAmount"] as? Double) ?? total
         let date = timestamp.dateValue()
 
-        let methodRaw = data["method"] as? String ?? CapturedInvoice.Method.manual.rawValue
-        let method = CapturedInvoice.Method(rawValue: methodRaw) ?? .manual
+        // `lastEdited` is the user's edit time and drives merge decisions; `last_updated`
+        // is only the upload stamp, so it must never win — treating it as the edit time
+        // made every remote copy look newer than the local one.
+        let lastEdited = (data["lastEdited"] as? Timestamp)?.dateValue()
+            ?? (data["last_updated"] as? Timestamp)?.dateValue()
+            ?? date
 
-        let categoryValue = (data["category"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
-        let category = categoryValue?.isEmpty == true ? nil : categoryValue
-
-        let lastEdited: Date
-        if let updated = data["last_updated"] as? Timestamp {
-            lastEdited = updated.dateValue()
-        } else if let lastEditedTimestamp = data["lastEdited"] as? Timestamp {
-            lastEdited = lastEditedTimestamp.dateValue()
-        } else {
-            lastEdited = date
+        let items = (data["items"] as? [[String: Any]] ?? []).map { item in
+            ManualInvoiceItem(id: (item["id"] as? String).flatMap(UUID.init(uuidString:)) ?? UUID(),
+                              name: item["name"] as? String ?? "",
+                              quantity: item["quantity"] as? String ?? "",
+                              unitPrice: item["unitPrice"] as? String ?? "",
+                              totalAmount: item["totalAmount"] as? String ?? "")
         }
-
-        let itemsData = data["items"] as? [[String: Any]] ?? []
-        let items: [ManualInvoiceItem] = itemsData.map { itemData in
-            ManualInvoiceItem(
-                name: itemData["name"] as? String ?? "",
-                quantity: itemData["quantity"] as? String ?? "",
-                unitPrice: itemData["unitPrice"] as? String ?? "",
-                totalAmount: itemData["totalAmount"] as? String ?? ""
-            )
-        }
-
-        let identifier = UUID(uuidString: documentID) ?? UUID()
 
         return CapturedInvoice(
-            id: identifier,
+            // A document ID that is not a UUID would mint a fresh one on every fetch,
+            // duplicating the invoice locally each time, so skip it instead.
+            id: UUID(uuidString: documentID) ?? UUID(uuidString: data["id"] as? String ?? "") ?? UUID(),
             supplier: supplier,
-            total: Decimal(totalValue),
-            ourAmount: Decimal(ourAmountValue),
-            gst: Decimal(gstValue),
+            total: Decimal(roundedFrom: total),
+            ourAmount: Decimal(roundedFrom: ourAmount),
+            gst: Decimal(roundedFrom: data["gst"] as? Double ?? 0),
             date: date,
-            method: method,
-            category: category,
+            method: CapturedInvoice.Method(rawValue: data["method"] as? String ?? "") ?? .manual,
+            category: (data["category"] as? String)?.trimmed.nilIfEmpty,
             items: items,
             imageData: nil,
             pdfData: nil,
@@ -164,5 +160,5 @@ final class InvoiceFirestoreUploader: InvoiceFirestoreUploading {
             lastEdited: lastEdited
         )
     }
-#endif
 }
+#endif

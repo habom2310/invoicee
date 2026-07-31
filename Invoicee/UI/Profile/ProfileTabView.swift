@@ -2,11 +2,7 @@ internal import SwiftUI
 
 /// Hosts account preferences and Google Drive linking flows.
 struct ProfileTabView: View {
-    @StateObject private var driveLinkViewModel: GoogleDriveLinkViewModel
-
-    init(viewModel: @autoclosure @escaping () -> GoogleDriveLinkViewModel) {
-        _driveLinkViewModel = StateObject(wrappedValue: viewModel())
-    }
+    @EnvironmentObject private var driveConnector: GoogleDriveConnector
 
     var body: some View {
         NavigationStack {
@@ -34,36 +30,21 @@ struct ProfileTabView: View {
     private var settingsSection: some View {
         Section("Settings") {
             NavigationLink {
-                GoogleDriveSettingsView(viewModel: driveLinkViewModel)
+                GoogleDriveSettingsView()
             } label: {
                 HStack {
                     Image(systemName: "cloud.fill")
                         .foregroundStyle(.blue)
                     Text("Link Google Drive")
                     Spacer()
-                    driveStatusView
+                    if driveConnector.state == .authorizing {
+                        ProgressView()
+                    } else {
+                        Text(driveConnector.state.label)
+                            .font(.footnote)
+                            .foregroundStyle(driveConnector.state.tint)
+                    }
                 }
-            }
-        }
-    }
-
-    private var driveStatusView: some View {
-        Group {
-            switch driveLinkViewModel.authorizationState {
-            case .signedOut:
-                Text("Not linked")
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
-            case .authorizing:
-                ProgressView()
-            case .linked:
-                Text("Linked")
-                    .font(.footnote)
-                    .foregroundStyle(.green)
-            case .failed:
-                Text("Error")
-                    .font(.footnote)
-                    .foregroundStyle(.red)
             }
         }
     }
@@ -71,9 +52,10 @@ struct ProfileTabView: View {
 
 /// Detailed controls for linking and managing Google Drive sync.
 struct GoogleDriveSettingsView: View {
-    @ObservedObject var viewModel: GoogleDriveLinkViewModel
-    @State private var showingUnlinkConfirmation = false
-    @State private var requiresForceUnlink = false
+    @EnvironmentObject private var driveConnector: GoogleDriveConnector
+    @EnvironmentObject private var archive: InvoiceArchive
+    @State private var isConfirmingUnlink = false
+    @State private var actionErrorMessage: String?
 
     var body: some View {
         Form {
@@ -83,9 +65,15 @@ struct GoogleDriveSettingsView: View {
         .navigationTitle("Google Drive")
         .navigationBarTitleDisplayMode(.inline)
         .alert(unlinkAlertTitle,
-               isPresented: $showingUnlinkConfirmation,
+               isPresented: $isConfirmingUnlink,
                actions: unlinkAlertActions,
-               message: { Text(unlinkAlertMessageText) })
+               message: { Text(unlinkAlertMessage) })
+    }
+
+    /// Unlinking discards invoices that were never uploaded, so it needs a sterner
+    /// confirmation than an ordinary unlink.
+    private var hasUnsyncedWork: Bool {
+        driveConnector.hasUnsyncedInvoices
     }
 
     private var connectionSection: some View {
@@ -93,21 +81,21 @@ struct GoogleDriveSettingsView: View {
             HStack {
                 Text("Status")
                 Spacer()
-                Text(viewModel.authorizationState.label)
-                    .foregroundStyle(viewModel.authorizationState.color)
+                Text(driveConnector.state.label)
+                    .foregroundStyle(driveConnector.state.tint)
             }
 
-            if let accountName = viewModel.accountDisplayName, viewModel.authorizationState == .linked {
-                HStack {
-                    Text("Account")
-                    Spacer()
-                    Text(accountName)
-                        .foregroundStyle(.secondary)
+            if driveConnector.state == .linked {
+                if let accountName = driveConnector.accountDisplayName {
+                    HStack {
+                        Text("Account")
+                        Spacer()
+                        Text(accountName)
+                            .foregroundStyle(.secondary)
+                    }
                 }
-            }
 
-            if viewModel.authorizationState == .linked {
-                if viewModel.hasUnsyncedInvoices {
+                if hasUnsyncedWork {
                     Label("You have invoices waiting to sync. Please sync before unlinking.",
                           systemImage: "exclamationmark.triangle.fill")
                         .font(.footnote)
@@ -115,31 +103,33 @@ struct GoogleDriveSettingsView: View {
                 }
 
                 Button(role: .destructive) {
-                    requiresForceUnlink = viewModel.hasUnsyncedInvoices
-                    showingUnlinkConfirmation = true
+                    isConfirmingUnlink = true
                 } label: {
                     Label("Unlink Google Drive", systemImage: "link.slash")
                         .frame(maxWidth: .infinity, alignment: .leading)
                 }
                 .buttonStyle(.borderedProminent)
-                .disabled(viewModel.isSyncing)
+                .disabled(driveConnector.isSyncing)
                 .tint(.red)
             } else {
-                Button(action: viewModel.linkAccount) {
+                Button {
+                    actionErrorMessage = nil
+                    Task { await driveConnector.linkAccount() }
+                } label: {
                     Label("Link Google Drive", systemImage: "link")
                         .frame(maxWidth: .infinity, alignment: .leading)
                 }
                 .buttonStyle(.borderedProminent)
-                .disabled(viewModel.authorizationState == .authorizing)
+                .disabled(driveConnector.state == .authorizing)
             }
 
-            if let errorMessage = viewModel.errorMessage {
-                Text(errorMessage)
+            if let message = actionErrorMessage ?? driveConnector.linkIssueMessage {
+                Text(message)
                     .font(.footnote)
                     .foregroundStyle(.red)
             }
 
-            if let syncMessage = viewModel.syncStatusMessage {
+            if let syncMessage = driveConnector.lastSyncSummary {
                 Text(syncMessage)
                     .font(.footnote)
                     .foregroundStyle(.secondary)
@@ -149,52 +139,64 @@ struct GoogleDriveSettingsView: View {
 
     private var qualitySection: some View {
         Section("Image Quality") {
-            Picker("Upload Size", selection: $viewModel.imageQuality) {
+            Picker("Upload Size", selection: $driveConnector.imageQuality) {
                 ForEach(InvoiceImageQuality.allCases) { option in
                     Text(option.displayName).tag(option)
                 }
             }
             .pickerStyle(.menu)
 
-            Text(viewModel.imageQuality.description)
+            Text(driveConnector.imageQuality.description)
                 .font(.footnote)
                 .foregroundStyle(.secondary)
         }
     }
 
     private var unlinkAlertTitle: String {
-        requiresForceUnlink ? "Unsynced Invoices Detected" : "Unlink Google Drive?"
+        hasUnsyncedWork ? "Unsynced Invoices Detected" : "Unlink Google Drive?"
     }
 
-    private var unlinkAlertMessageText: String {
-        if requiresForceUnlink {
-            return "There are invoices that have not been synced yet. Sync them now to avoid losing changes. You can also unlink anyway to remove the unsynced invoices from this device."
-        } else {
-            return "Invoices will no longer sync with Google Drive until you link the account again."
-        }
+    private var unlinkAlertMessage: String {
+        hasUnsyncedWork
+            ? "There are invoices that have not been synced yet. Sync them now to avoid losing changes. You can also unlink anyway to remove the unsynced invoices from this device."
+            : "Invoices will no longer sync with Google Drive until you link the account again."
     }
 
     @ViewBuilder
     private func unlinkAlertActions() -> some View {
-        if requiresForceUnlink {
-            Button("Sync Now") {
-                showingUnlinkConfirmation = false
-                viewModel.syncInvoices()
-            }
-            Button("Unlink Anyway", role: .destructive) {
-                viewModel.unlinkAccount(force: true)
-            }
+        if hasUnsyncedWork {
+            Button("Sync Now") { syncNow() }
+            Button("Unlink Anyway", role: .destructive) { unlink(force: true) }
         } else {
-            Button("Unlink", role: .destructive) {
-                viewModel.unlinkAccount(force: false)
-            }
+            Button("Unlink", role: .destructive) { unlink(force: false) }
         }
 
         Button("Cancel", role: .cancel) {}
     }
+
+    private func syncNow() {
+        actionErrorMessage = nil
+        guard !archive.invoices.isEmpty else {
+            actionErrorMessage = "No invoices available to sync."
+            return
+        }
+
+        Task {
+            do {
+                try await driveConnector.syncNow()
+            } catch {
+                actionErrorMessage = error.userFacingDescription
+            }
+        }
+    }
+
+    private func unlink(force: Bool) {
+        actionErrorMessage = nil
+        Task { await driveConnector.unlinkAccount(force: force) }
+    }
 }
 
-private extension GoogleDriveAuthorizationState {
+extension GoogleDriveAuthorizationState {
     var label: String {
         switch self {
         case .signedOut: "Not linked"
@@ -204,10 +206,9 @@ private extension GoogleDriveAuthorizationState {
         }
     }
 
-    var color: Color {
+    var tint: Color {
         switch self {
-        case .signedOut: .secondary
-        case .authorizing: .secondary
+        case .signedOut, .authorizing: .secondary
         case .linked: .green
         case .failed: .red
         }

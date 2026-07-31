@@ -1,29 +1,27 @@
 internal import SwiftUI
-#if canImport(UIKit)
 import UIKit
-#elseif canImport(AppKit)
-import AppKit
-#endif
-#if canImport(PDFKit)
-import PDFKit
-#endif
 
 /// Shows detailed metadata for a captured invoice with editing actions.
+///
+/// Edits are made against `draft` and only written back to the archive on Save, so
+/// abandoning the screen abandons the changes.
 struct InvoiceDetailView: View {
     @Binding var invoice: CapturedInvoice
     @Environment(\.dismiss) private var dismiss
     @EnvironmentObject private var categoryStore: InvoiceCategoryStore
     @EnvironmentObject private var driveConnector: GoogleDriveConnector
     @EnvironmentObject private var appEnvironment: AppEnvironment
+
     let onDelete: (CapturedInvoice) -> Void
+
     @State private var draft: CapturedInvoice
-    @State private var newCategoryName: String = ""
-    @State private var itemsExpanded: Bool = false
+    @State private var newCategoryName = ""
+    @State private var itemsExpanded = false
     @State private var isDownloadingAttachment = false
-    @State private var downloadErrorMessage: String? = nil
+    @State private var downloadErrorMessage: String?
     @State private var isShowingDeleteConfirmation = false
     @State private var isDeleting = false
-    @State private var deleteErrorMessage: String? = nil
+    @State private var deleteErrorMessage: String?
 
     init(invoice: Binding<CapturedInvoice>,
          onDelete: @escaping (CapturedInvoice) -> Void = { _ in }) {
@@ -32,163 +30,28 @@ struct InvoiceDetailView: View {
         self.onDelete = onDelete
     }
 
-    private var draftItemsBinding: Binding<[ManualInvoiceItem]> {
-        Binding(
-            get: { draft.items },
-            set: { draft.items = $0 }
-        )
-    }
-
-    private var remoteAttachmentFileName: String? {
-        draft.remotePDFFileName ?? draft.remoteImageFileName
-    }
-
-    private var remoteAttachmentIsPDF: Bool {
-        draft.remotePDFFileName != nil
-    }
-
     var body: some View {
         Form {
             Section("Invoice Info") {
                 VStack(alignment: .leading, spacing: 16) {
-                    InvoiceFieldLabel("Supplier")
-                    TextField("Supplier", text: $draft.supplier)
-                        .invoiceInputStyle()
-
-                    InvoiceFieldLabel("Total Amount")
-                    InvoiceCurrencyField("Total amount", text: totalAmountBinding)
-
-                    InvoiceFieldLabel("Our Amount")
-                    InvoiceCurrencyField("Our amount", text: ourAmountBinding)
-
-                    InvoiceFieldLabel("GST Amount")
-                    InvoiceCurrencyField("GST amount", text: gstAmountBinding)
-
-                    InvoiceFieldLabel("Category")
-                    Menu {
-                        Button("None") { draft.category = nil }
-                        ForEach(categoryStore.categories, id: \.self) { category in
-                            Button(category) { draft.category = category }
-                        }
-                    } label: {
-                        HStack {
-                            Text(draft.category ?? "Select category")
-                            Spacer()
-                            Image(systemName: "chevron.up.chevron.down")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                        }
-                        .padding(.vertical, 8)
-                        .padding(.horizontal, 12)
-                        .background(Color.secondary.opacity(0.1))
-                        .clipShape(RoundedRectangle(cornerRadius: 10))
-                    }
-
-                    HStack {
-                        TextField("Add new category", text: $newCategoryName)
-                            .textInputAutocapitalization(.words)
-                        Button("Add") {
-                            addCategory()
-                        }
-                        .disabled(!canAddNewCategory)
-                    }
-
-                    InvoiceFieldLabel("Date")
-                    DatePicker("", selection: $draft.date, displayedComponents: .date)
-                        .labelsHidden()
-
-                    InvoiceFieldLabel("Capture Method")
-                    HStack(spacing: 8) {
-                        Image(systemName: draft.method.iconName)
-                            .foregroundStyle(.secondary)
-                        Text(draft.method.title)
-                            .foregroundStyle(.secondary)
-                        Spacer()
-                    }
-
-#if canImport(UIKit)
-                    if let imageData = draft.imageData, let uiImage = UIImage(data: imageData) {
-                        capturedImagePreview(Image(uiImage: uiImage))
-                    }
-#elseif canImport(AppKit)
-                    if let imageData = draft.imageData, let nsImage = NSImage(data: imageData) {
-                        capturedImagePreview(Image(nsImage: nsImage))
-                    }
-#endif
-
-                    if draft.imageData == nil,
-                       let remoteFileName = remoteAttachmentFileName {
-                        VStack(alignment: .leading, spacing: 8) {
-                            InvoiceFieldLabel(remoteAttachmentIsPDF ? "Invoice PDF" : "Captured Image")
-                            Button {
-                                downloadRemoteAttachment(named: remoteFileName, isPDF: remoteAttachmentIsPDF)
-                            } label: {
-                                if isDownloadingAttachment {
-                                    ProgressView()
-                                        .progressViewStyle(.circular)
-                                        .frame(maxWidth: .infinity)
-                                } else {
-                                    Label(remoteAttachmentIsPDF ? "Download PDF from Google Drive" : "Download from Google Drive",
-                                          systemImage: remoteAttachmentIsPDF ? "arrow.down.doc" : "arrow.down.circle")
-                                        .frame(maxWidth: .infinity)
-                                }
-                            }
-                            .buttonStyle(.borderedProminent)
-                            .disabled(isDownloadingAttachment || driveConnector.state != .linked || isDeleting)
-
-                            if driveConnector.state != .linked && !isDownloadingAttachment {
-                                Text("Link Google Drive to download the original file.")
-                                    .font(.footnote)
-                                    .foregroundStyle(.secondary)
-                            }
-
-                            if let downloadErrorMessage {
-                                Text(downloadErrorMessage)
-                                    .font(.footnote)
-                                    .foregroundStyle(.red)
-                                    .multilineTextAlignment(.leading)
-                            }
-                        }
-                    }
-
+                    // Split across three properties: a single `@ViewBuilder` block accepts
+                    // at most ten children, and these fields total fifteen.
+                    supplierAndAmountFields
+                    categoryFields
+                    dateAndMethodFields
+                    attachment
                     if let deleteErrorMessage {
                         Text(deleteErrorMessage)
                             .font(.footnote)
                             .foregroundStyle(.red)
-                            .multilineTextAlignment(.leading)
                     }
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
 
-            Section {
-                DisclosureGroup(isExpanded: $itemsExpanded) {
-                    if draft.items.isEmpty {
-                        Text("No items recorded.")
-                            .foregroundStyle(.secondary)
-                    }
-
-                    ForEach(draftItemsBinding) { $item in
-                        InvoiceItemFields(item: $item) {
-                            removeItem(withID: item.id)
-                        }
-                    }
-
-                    Button {
-                        addItem()
-                    } label: {
-                        Label("Add Item", systemImage: "plus.circle")
-                    }
-                } label: {
-                    HStack {
-                        Text("Items [\(draft.items.count)]")
-                            .font(.headline)
-                        Spacer()
-                    }
-                }
-            }
+            itemsSection
         }
-        .navigationTitle(draft.supplier.isEmpty ? "Invoice Details" : draft.supplier)
+        .navigationTitle(draft.supplier.nilIfEmpty ?? "Invoice Details")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             ToolbarItem(placement: .navigationBarLeading) {
@@ -202,7 +65,9 @@ struct InvoiceDetailView: View {
                     }
                 }
                 .disabled(isDeleting)
-                .confirmationDialog("Delete invoice?", isPresented: $isShowingDeleteConfirmation, titleVisibility: .visible) {
+                .confirmationDialog("Delete invoice?",
+                                    isPresented: $isShowingDeleteConfirmation,
+                                    titleVisibility: .visible) {
                     Button("Delete", role: .destructive) {
                         Task { await deleteInvoice() }
                     }
@@ -210,39 +75,205 @@ struct InvoiceDetailView: View {
             }
 
             ToolbarItem(placement: .navigationBarTrailing) {
-                Button("Save") {
-                    saveChanges()
-                }
-                .disabled(isDeleting)
+                Button("Save") { saveChanges() }
+                    .disabled(isDeleting)
             }
         }
+    }
 
-        .onAppear {
-            draft = invoice
+    // MARK: - Fields
+
+    @ViewBuilder
+    private var supplierAndAmountFields: some View {
+        InvoiceFieldLabel("Supplier")
+        TextField("Supplier", text: $draft.supplier)
+            .invoiceInputStyle()
+
+        InvoiceFieldLabel("Total Amount")
+        InvoiceCurrencyField("Total amount", text: .money($draft.total) { oldTotal, newTotal in
+            // Our Amount was mirroring the total, so keep it in step; if the user had set
+            // it to something else, leave their figure alone.
+            if draft.ourAmount == oldTotal {
+                draft.ourAmount = newTotal
+            }
+            draft.gst = GSTValidator.sanitizedAmount(for: draft.gst, total: newTotal) ?? .zero
+        })
+
+        InvoiceFieldLabel("Our Amount")
+        InvoiceCurrencyField("Our amount", text: .money($draft.ourAmount))
+
+        InvoiceFieldLabel("GST Amount")
+        InvoiceCurrencyField("GST amount", text: .money($draft.gst) { _, entered in
+            draft.gst = GSTValidator.sanitizedAmount(for: entered, total: draft.total) ?? .zero
+        })
+
+    }
+
+    @ViewBuilder
+    private var categoryFields: some View {
+        InvoiceFieldLabel("Category")
+        CategoryMenu(categories: categoryStore.categories, selection: draft.category) { category in
+            draft.category = category
+        }
+
+        HStack {
+            TextField("Add new category", text: $newCategoryName)
+                .textInputAutocapitalization(.words)
+            Button("Add") { addCategory() }
+                .disabled(!canAddNewCategory)
         }
     }
 
-    private func capturedImagePreview(_ image: Image) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
-            InvoiceFieldLabel("Captured Image")
-            image
-                .resizable()
-                .scaledToFit()
-                .frame(maxWidth: .infinity)
-                .clipShape(RoundedRectangle(cornerRadius: 12))
+    @ViewBuilder
+    private var dateAndMethodFields: some View {
+        InvoiceFieldLabel("Date")
+        DatePicker("", selection: $draft.date, displayedComponents: .date)
+            .labelsHidden()
+
+        InvoiceFieldLabel("Capture Method")
+        HStack(spacing: 8) {
+            Image(systemName: draft.method.iconName)
+            Text(draft.method.title)
+            Spacer()
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
+        .foregroundStyle(.secondary)
     }
 
-    private func addItem() {
-        draft.items.append(ManualInvoiceItem())
+    private var itemsSection: some View {
+        Section {
+            DisclosureGroup(isExpanded: $itemsExpanded) {
+                if draft.items.isEmpty {
+                    Text("No items recorded.")
+                        .foregroundStyle(.secondary)
+                }
+
+                ForEach($draft.items) { $item in
+                    InvoiceItemFields(item: $item) {
+                        draft.items.removeAll { $0.id == item.id }
+                    }
+                }
+
+                Button {
+                    draft.items.append(ManualInvoiceItem())
+                } label: {
+                    Label("Add Item", systemImage: "plus.circle")
+                }
+            } label: {
+                HStack {
+                    Text("Items [\(draft.items.count)]")
+                        .font(.headline)
+                    Spacer()
+                }
+            }
+        }
     }
 
-    private func removeItem(withID id: ManualInvoiceItem.ID) {
-        var updatedItems = draftItemsBinding.wrappedValue
-        updatedItems.removeAll { $0.id == id }
-        draftItemsBinding.wrappedValue = updatedItems
+    // MARK: - Attachment
+
+    /// The remote file this invoice was uploaded as, preferring the PDF.
+    private var remoteAttachment: (fileName: String, isPDF: Bool)? {
+        if let pdf = draft.remotePDFFileName?.nilIfEmpty { return (pdf, true) }
+        if let image = draft.remoteImageFileName?.nilIfEmpty { return (image, false) }
+        return nil
     }
+
+    @ViewBuilder
+    private var attachment: some View {
+        if let imageData = draft.imageData, let uiImage = UIImage(data: imageData) {
+            VStack(alignment: .leading, spacing: 8) {
+                InvoiceFieldLabel("Captured Image")
+                Image(uiImage: uiImage)
+                    .resizable()
+                    .scaledToFit()
+                    .frame(maxWidth: .infinity)
+                    .clipShape(RoundedRectangle(cornerRadius: 12))
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        } else if let remote = remoteAttachment {
+            VStack(alignment: .leading, spacing: 8) {
+                InvoiceFieldLabel(remote.isPDF ? "Invoice PDF" : "Captured Image")
+                Button {
+                    downloadRemoteAttachment(named: remote.fileName, isPDF: remote.isPDF)
+                } label: {
+                    if isDownloadingAttachment {
+                        ProgressView()
+                            .frame(maxWidth: .infinity)
+                    } else {
+                        Label(remote.isPDF ? "Download PDF from Google Drive" : "Download from Google Drive",
+                              systemImage: remote.isPDF ? "arrow.down.doc" : "arrow.down.circle")
+                            .frame(maxWidth: .infinity)
+                    }
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(isDownloadingAttachment || isDeleting || driveConnector.state != .linked)
+
+                if driveConnector.state != .linked, !isDownloadingAttachment {
+                    Text("Link Google Drive to download the original file.")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
+
+                if let downloadErrorMessage {
+                    Text(downloadErrorMessage)
+                        .font(.footnote)
+                        .foregroundStyle(.red)
+                }
+            }
+        }
+    }
+
+    private func downloadRemoteAttachment(named fileName: String, isPDF: Bool) {
+        guard !isDownloadingAttachment, !isDeleting, driveConnector.state == .linked else { return }
+
+        isDownloadingAttachment = true
+        downloadErrorMessage = nil
+
+        Task {
+            defer { isDownloadingAttachment = false }
+            do {
+                let data = try await driveConnector.transferService
+                    .downloadInvoiceImage(fileName: fileName, invoiceDate: draft.date)
+                // A PDF needs rasterising for the inline preview; the render runs off the
+                // main actor so a large page does not stall the screen.
+                let previewData = isPDF ? try PDFPageRenderer.firstPageJPEG(of: data) : data
+
+                draft.imageData = previewData
+                if isPDF {
+                    draft.pdfData = data
+                    draft.remotePDFFileName = fileName
+                } else {
+                    draft.remoteImageFileName = fileName
+                }
+
+                // Persist the attachment without committing unsaved field edits: the user
+                // asked to fetch a file, not to save the form.
+                var stored = invoice
+                stored.imageData = draft.imageData
+                stored.pdfData = draft.pdfData
+                stored.remoteImageFileName = draft.remoteImageFileName
+                stored.remotePDFFileName = draft.remotePDFFileName
+                invoice = stored
+            } catch {
+                downloadErrorMessage = error.userFacingDescription
+            }
+        }
+    }
+
+    // MARK: - Categories
+
+    private var canAddNewCategory: Bool {
+        guard let trimmed = newCategoryName.trimmed.nilIfEmpty else { return false }
+        return !categoryStore.categories.containsIgnoringCase(trimmed)
+    }
+
+    private func addCategory() {
+        guard let trimmed = newCategoryName.trimmed.nilIfEmpty else { return }
+        categoryStore.addCategory(trimmed)
+        draft.category = trimmed
+        newCategoryName = ""
+    }
+
+    // MARK: - Save and delete
 
     private func saveChanges() {
         guard !isDeleting else { return }
@@ -252,195 +283,46 @@ struct InvoiceDetailView: View {
         dismiss()
     }
 
-    private func downloadRemoteAttachment(named fileName: String, isPDF: Bool) {
-        guard !isDownloadingAttachment else { return }
-        guard !isDeleting else { return }
-        guard driveConnector.state == .linked else {
-            downloadErrorMessage = "Google Drive is not linked."
-            return
-        }
-
-        isDownloadingAttachment = true
-        downloadErrorMessage = nil
-
-        Task {
-            do {
-                let data = try await driveConnector.transferService.downloadInvoiceImage(fileName: fileName, invoiceDate: draft.date)
-                let previewData: Data
-                if isPDF {
-#if canImport(PDFKit)
-                    previewData = try renderPreviewImageData(fromPDF: data)
-#else
-                    throw AttachmentConversionError.pdfUnsupported
-#endif
-                } else {
-                    previewData = data
-                }
-
-                await MainActor.run {
-                    if isPDF {
-                        draft.pdfData = data
-                        draft.remotePDFFileName = fileName
-                        invoice.pdfData = data
-                        invoice.remotePDFFileName = fileName
-                        draft.remoteImageFileName = nil
-                        invoice.remoteImageFileName = nil
-                    } else {
-                        draft.pdfData = nil
-                        invoice.pdfData = nil
-                        draft.remotePDFFileName = nil
-                        invoice.remotePDFFileName = nil
-                        draft.remoteImageFileName = fileName
-                        invoice.remoteImageFileName = fileName
-                    }
-                    draft.imageData = previewData
-                    invoice.imageData = previewData
-                    isDownloadingAttachment = false
-                }
-            } catch {
-                await MainActor.run {
-                    downloadErrorMessage = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
-                    isDownloadingAttachment = false
-                }
-            }
-        }
-    }
-
-#if canImport(PDFKit)
-    private func renderPreviewImageData(fromPDF data: Data) throws -> Data {
-#if canImport(UIKit)
-        guard let document = PDFDocument(data: data),
-              let page = document.page(at: 0) else {
-            throw AttachmentConversionError.invalidPDF
-        }
-
-        let pageRect = page.bounds(for: .mediaBox)
-        let rendererFormat = UIGraphicsImageRendererFormat()
-        rendererFormat.scale = UIScreen.main.scale * 2
-        rendererFormat.opaque = true
-        let renderer = UIGraphicsImageRenderer(size: pageRect.size, format: rendererFormat)
-
-        let image = renderer.image { context in
-            UIColor.white.setFill()
-            context.fill(CGRect(origin: .zero, size: pageRect.size))
-            context.cgContext.saveGState()
-            context.cgContext.translateBy(x: 0, y: pageRect.size.height)
-            context.cgContext.scaleBy(x: 1, y: -1)
-            page.draw(with: .mediaBox, to: context.cgContext)
-            context.cgContext.restoreGState()
-        }
-
-        guard let jpeg = image.jpegData(compressionQuality: 0.85) else {
-            throw AttachmentConversionError.renderFailed
-        }
-        return jpeg
-#elseif canImport(AppKit)
-        guard let document = PDFDocument(data: data),
-              let page = document.page(at: 0) else {
-            throw AttachmentConversionError.invalidPDF
-        }
-
-        let pageRect = page.bounds(for: .mediaBox)
-        let image = NSImage(size: pageRect.size)
-        image.lockFocus()
-        guard let context = NSGraphicsContext.current?.cgContext else {
-            image.unlockFocus()
-            throw AttachmentConversionError.renderFailed
-        }
-
-        context.saveGState()
-        context.translateBy(x: 0, y: pageRect.size.height)
-        context.scaleBy(x: 1, y: -1)
-        page.draw(with: .mediaBox, to: context)
-        context.restoreGState()
-        image.unlockFocus()
-
-        guard let tiff = image.tiffRepresentation,
-              let bitmap = NSBitmapImageRep(data: tiff),
-              let jpeg = bitmap.representation(using: .jpeg, properties: [.compressionFactor: 0.85]) else {
-            throw AttachmentConversionError.renderFailed
-        }
-        return jpeg
-#else
-        throw AttachmentConversionError.pdfUnsupported
-#endif
-    }
-#endif
-
-    private enum AttachmentConversionError: LocalizedError {
-        case invalidPDF
-        case renderFailed
-        case pdfUnsupported
-
-        var errorDescription: String? {
-            switch self {
-            case .invalidPDF:
-                return "Unable to read the downloaded PDF."
-            case .renderFailed:
-                return "Unable to render a preview for the PDF."
-            case .pdfUnsupported:
-                return "PDF preview is not supported on this device."
-            }
-        }
-    }
-
     private func deleteInvoice() async {
-        await MainActor.run {
-            isDeleting = true
-            deleteErrorMessage = nil
-        }
+        isDeleting = true
+        deleteErrorMessage = nil
+        defer { isDeleting = false }
 
-        let invoiceToDelete = await MainActor.run { invoice }
-        var remoteImageFileName = await MainActor.run { invoice.remoteImageFileName }
-        var remotePDFFileName = await MainActor.run { invoice.remotePDFFileName }
-        let invoiceDate = invoiceToDelete.date
+        let invoiceToDelete = invoice
         let tracker = appEnvironment.syncTracker
         let trackerRecord = await tracker.record(for: invoiceToDelete.id)
-        if remoteImageFileName == nil,
-           let path = trackerRecord?.imagePath {
-            remoteImageFileName = path.split(separator: "/").last.map(String.init)
-        }
-        if remotePDFFileName == nil,
-           let path = trackerRecord?.pdfPath {
-            remotePDFFileName = path.split(separator: "/").last.map(String.init)
-        }
+
+        // Fall back to the tracker's record when the invoice never learnt its remote name.
+        let remoteFileNames = [
+            invoiceToDelete.remoteImageFileName ?? Self.fileName(from: trackerRecord?.imagePath),
+            invoiceToDelete.remotePDFFileName ?? Self.fileName(from: trackerRecord?.pdfPath)
+        ]
+        .compactMap { $0?.nilIfEmpty }
 
         do {
-            let driveState = await MainActor.run { driveConnector.state }
-
-            let requiresDrive = [remoteImageFileName, remotePDFFileName]
-                .compactMap { $0 }
-                .contains { !$0.isEmpty }
-
-            if requiresDrive, driveState != .linked {
+            // Refuse rather than orphan: deleting locally while the Drive copy survives
+            // would leave a file the app can no longer see or clean up.
+            if !remoteFileNames.isEmpty, driveConnector.state != .linked {
                 throw InvoiceDeletionError.driveNotLinked
             }
 
-            if driveState == .linked {
-                if let remoteImageFileName, !remoteImageFileName.isEmpty {
-                    try await driveConnector.transferService.deleteInvoiceImage(fileName: remoteImageFileName, invoiceDate: invoiceDate)
-                }
-                if let remotePDFFileName, !remotePDFFileName.isEmpty {
-                    try await driveConnector.transferService.deleteInvoiceImage(fileName: remotePDFFileName, invoiceDate: invoiceDate)
-                }
+            for fileName in remoteFileNames {
+                try await driveConnector.transferService
+                    .deleteInvoiceImage(fileName: fileName, invoiceDate: invoiceToDelete.date)
             }
 
             try await appEnvironment.firestoreUploader.delete(invoiceID: invoiceToDelete.id)
             await tracker.removeRecord(for: invoiceToDelete.id)
 
-            await MainActor.run {
-                onDelete(invoiceToDelete)
-                dismiss()
-            }
+            onDelete(invoiceToDelete)
+            dismiss()
         } catch {
-            await MainActor.run {
-                deleteErrorMessage = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
-            }
+            deleteErrorMessage = error.userFacingDescription
         }
+    }
 
-        await MainActor.run {
-            isDeleting = false
-        }
+    private static func fileName(from path: String?) -> String? {
+        path?.split(separator: "/").last.map(String.init)
     }
 
     private enum InvoiceDeletionError: LocalizedError {
@@ -448,72 +330,8 @@ struct InvoiceDetailView: View {
 
         var errorDescription: String? {
             switch self {
-            case .driveNotLinked:
-                return "Link Google Drive before deleting a synced invoice."
+            case .driveNotLinked: "Link Google Drive before deleting a synced invoice."
             }
         }
-    }
-
-    private var canAddNewCategory: Bool {
-        let trimmed = newCategoryName.trimmed
-        guard !trimmed.isEmpty else { return false }
-        return !categoryStore.categories.contains { $0.caseInsensitiveCompare(trimmed) == .orderedSame }
-    }
-
-    private func addCategory() {
-        let trimmed = newCategoryName.trimmed
-        guard !trimmed.isEmpty else { return }
-        categoryStore.addCategory(trimmed)
-        draft.category = trimmed
-        newCategoryName = ""
-    }
-
-    private var totalAmountBinding: Binding<String> {
-        Binding(
-            get: { draft.total.plainString },
-            set: { newValue in
-                let filtered = newValue.filteredNumeric(allowDecimal: true)
-                let previousTotal = draft.total
-                draft.total = Decimal(string: filtered) ?? 0
-                if draft.ourAmount == previousTotal {
-                    draft.ourAmount = draft.total
-                }
-                let sanitizedGST = GSTValidator.sanitizedAmount(for: draft.gst, total: draft.total)
-                draft.gst = sanitizedGST ?? 0
-            }
-        )
-    }
-
-    private var gstAmountBinding: Binding<String> {
-        Binding(
-            get: { draft.gst.plainString },
-            set: { newValue in
-                let filtered = newValue.filteredNumeric(allowDecimal: true)
-                guard !filtered.isEmpty else {
-                    draft.gst = 0
-                    return
-                }
-
-                if let decimal = Decimal(string: filtered) {
-                    draft.gst = GSTValidator.sanitizedAmount(for: decimal, total: draft.total) ?? 0
-                } else {
-                    draft.gst = 0
-                }
-            }
-        )
-    }
-
-    private var ourAmountBinding: Binding<String> {
-        Binding(
-            get: { draft.ourAmount.plainString },
-            set: { newValue in
-                let filtered = newValue.filteredNumeric(allowDecimal: true)
-                if filtered.isEmpty {
-                    draft.ourAmount = draft.total
-                } else {
-                    draft.ourAmount = Decimal(string: filtered) ?? draft.total
-                }
-            }
-        )
     }
 }

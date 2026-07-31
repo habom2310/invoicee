@@ -1,14 +1,11 @@
 internal import SwiftUI
-import UniformTypeIdentifiers
 
 /// Presents profit summaries derived from revenue and expenses.
 struct ProfitTabView: View {
     @EnvironmentObject private var driveConnector: GoogleDriveConnector
     @StateObject private var viewModel: ProfitAnalyticsViewModel
+    @StateObject private var export = CSVExportController()
     @State private var isShowingMonthPicker = false
-    @State private var isExportingCSV = false
-    @State private var exportDocument = CSVDocument(text: "")
-    @State private var exportErrorMessage: String?
 
     init(viewModel: @autoclosure @escaping () -> ProfitAnalyticsViewModel) {
         _viewModel = StateObject(wrappedValue: viewModel())
@@ -20,7 +17,7 @@ struct ProfitTabView: View {
                 if viewModel.isDriveLinked {
                     profitList
                 } else {
-                    linkPrompt
+                    LinkPromptView(message: "Link Google Drive to calculate profit.")
                 }
             }
             .navigationTitle("Profit")
@@ -37,19 +34,12 @@ struct ProfitTabView: View {
             }
             .background(Color.invoiceBackground.ignoresSafeArea())
         }
-        .task {
-            await viewModel.refresh()
-        }
-        .fileExporter(isPresented: $isExportingCSV,
-                      document: exportDocument,
-                      contentType: .commaSeparatedText,
-                      defaultFilename: profitExportFilename) { result in
-            if case let .failure(error) = result {
-                exportErrorMessage = error.localizedDescription
-            }
-        }
+        .task { await viewModel.refresh() }
+        .csvExporter(export)
         .sheet(isPresented: $isShowingMonthPicker) {
-            monthPickerSheet
+            MonthYearPickerSheet(month: $viewModel.selectedMonth,
+                                 year: $viewModel.selectedYear,
+                                 years: viewModel.availableYears)
         }
     }
 
@@ -58,7 +48,7 @@ struct ProfitTabView: View {
             filterSection
             summarySection
 
-            if viewModel.selectedFilter == .year {
+            if viewModel.selectedPeriod == .year {
                 yearlyBreakdownSection
             }
 
@@ -71,28 +61,13 @@ struct ProfitTabView: View {
                 }
             }
 
-            if let errorMessage = viewModel.errorMessage {
-                Section {
-                    Label(errorMessage, systemImage: "exclamationmark.triangle")
-                        .foregroundColor(.orange)
-                        .font(.footnote)
-                }
-            }
-
-            if let exportErrorMessage {
-                Section {
-                    Label(exportErrorMessage, systemImage: "exclamationmark.triangle")
-                        .foregroundColor(.orange)
-                        .font(.footnote)
-                }
-            }
+            WarningSection(viewModel.errorMessage)
+            WarningSection(export.errorMessage)
         }
         .listStyle(.insetGrouped)
         .scrollContentBackground(.hidden)
         .background(Color.invoiceBackground)
-        .refreshable {
-            await viewModel.refresh()
-        }
+        .refreshable { await viewModel.refresh() }
         .overlay {
             if viewModel.isLoading {
                 ProgressView()
@@ -103,14 +78,14 @@ struct ProfitTabView: View {
     private var filterSection: some View {
         Section {
             VStack(alignment: .leading, spacing: 12) {
-                Picker("Period", selection: $viewModel.selectedFilter) {
-                    ForEach(ProfitAnalyticsViewModel.Filter.allCases) { filter in
-                        Text(filter.displayName).tag(filter)
+                Picker("Period", selection: $viewModel.selectedPeriod) {
+                    ForEach(ReportingPeriod.allCases) { period in
+                        Text(period.displayName).tag(period)
                     }
                 }
                 .pickerStyle(.segmented)
 
-                switch viewModel.selectedFilter {
+                switch viewModel.selectedPeriod {
                 case .week:
                     if let description = viewModel.weekRangeDescription {
                         Text(description)
@@ -118,30 +93,11 @@ struct ProfitTabView: View {
                             .foregroundStyle(.secondary)
                     }
                 case .month:
-                    Button {
+                    MonthPickerButton(title: viewModel.monthPickerLabel) {
                         isShowingMonthPicker = true
-                    } label: {
-                        HStack {
-                            Image(systemName: "calendar")
-                            Text(viewModel.monthPickerLabel)
-                            Spacer()
-                            Image(systemName: "chevron.down")
-                                .font(.footnote)
-                                .foregroundStyle(.secondary)
-                        }
-                        .padding(.vertical, 8)
-                        .padding(.horizontal, 12)
-                        .background(Color.secondary.opacity(0.1))
-                        .clipShape(RoundedRectangle(cornerRadius: 10))
                     }
-                    .buttonStyle(.plain)
                 case .year:
-                    Picker("Year", selection: $viewModel.selectedYear) {
-                        ForEach(viewModel.availableYears, id: \.self) { year in
-                            Text(String(year)).tag(year)
-                        }
-                    }
-                    .pickerStyle(.menu)
+                    YearMenuButton(selection: $viewModel.selectedYear, years: viewModel.availableYears)
                 }
             }
             .padding(.vertical, 4)
@@ -165,15 +121,10 @@ struct ProfitTabView: View {
                     Text(viewModel.profitText)
                         .font(.system(size: 32, weight: .bold, design: .rounded))
                 }
-                if let percentage = viewModel.profitPercentageText {
-                    Text(percentage)
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-                } else {
-                    Text("No revenue recorded for this period yet.")
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-                }
+
+                Text(viewModel.profitPercentageText ?? "No revenue recorded for this period yet.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
             }
             .padding(.vertical, 4)
         }
@@ -190,184 +141,76 @@ struct ProfitTabView: View {
             } else {
                 ForEach(viewModel.monthlyBreakdown) { breakdown in
                     ProfitMonthRow(monthName: viewModel.monthName(for: breakdown.month),
-                                   profitText: breakdown.profit.formattedCurrency(),
-                                   percentageText: viewModel.formattedPercentage(for: breakdown))
+                                   profitText: breakdown.summary.profit.formattedCurrency(),
+                                   percentageText: ProfitAnalyticsViewModel.percentageText(breakdown.summary.profitPercentage))
                 }
             }
         }
     }
 
-    private var monthPickerSheet: some View {
-        NavigationStack {
-            VStack {
-                Text("Select Month")
-                    .font(.headline)
-                    .padding(.top)
-
-                HStack(spacing: 0) {
-                    Picker("Month", selection: $viewModel.selectedMonth) {
-                        ForEach(1...12, id: \.self) { month in
-                            Text(viewModel.monthName(for: month)).tag(month)
-                        }
-                    }
-                    .pickerStyle(.wheel)
-                    .frame(maxWidth: .infinity)
-                    .frame(height: 180)
-                    .clipped()
-
-                    Picker("Year", selection: $viewModel.selectedYear) {
-                        ForEach(viewModel.availableYears, id: \.self) { year in
-                            Text(String(year)).tag(year)
-                        }
-                    }
-                    .pickerStyle(.wheel)
-                    .frame(maxWidth: .infinity)
-                    .frame(height: 180)
-                    .clipped()
-                }
-                .padding(.horizontal)
-
-                Spacer()
-            }
-            .toolbar {
-                ToolbarItem(placement: .confirmationAction) {
-                    Button("Done") {
-                        isShowingMonthPicker = false
-                    }
-                }
-            }
-        }
-        .presentationDetents([.height(320), .medium])
-    }
-
-    private var linkPrompt: some View {
-        VStack(spacing: 16) {
-            Image(systemName: "link.circle")
-                .font(.system(size: 48))
-                .foregroundStyle(.secondary)
-            Text("Link Google Drive to calculate profit.")
-                .multilineTextAlignment(.center)
-                .foregroundStyle(.secondary)
-        }
-        .padding()
-    }
-}
-
-private extension ProfitTabView {
-    func startProfitExport() {
+    private func startProfitExport() {
         guard viewModel.hasAnyData else { return }
+        export.export(rows: makeProfitRows(),
+                      filename: "profit_\(periodIdentifier).csv",
+                      mirroringTo: driveConnector)
+    }
 
-        let csvContent = makeProfitCSV()
-        exportDocument = CSVDocument(text: csvContent)
-        isExportingCSV = true
-
-        let filename = profitExportFilename
-        Task {
-            await uploadProfitCSV(content: csvContent, filename: filename)
+    private var periodIdentifier: String {
+        switch viewModel.selectedPeriod {
+        case .week: ReportingDateFormatter.weekIdentifier(viewModel.selectedDateRange)
+        case .month: ReportingDateFormatter.monthIdentifier(month: viewModel.selectedMonth, year: viewModel.selectedYear)
+        case .year: "\(viewModel.selectedYear)"
         }
     }
 
-    var profitExportFilename: String {
-        "profit_\(profitPeriodIdentifier).csv"
-    }
-
-    var profitPeriodIdentifier: String {
-        switch viewModel.selectedFilter {
-        case .week:
-            if let range = viewModel.selectedDateRange {
-                let start = profitWeekFilenameFormatter.string(from: range.start)
-                let end = profitWeekFilenameFormatter.string(from: range.end)
-                return "Week_\(start)_\(end)"
-            }
-            return "Week_Current"
-        case .month:
-            let index = max(1, min(viewModel.selectedMonth, profitShortMonthSymbols.count))
-            let month = profitShortMonthSymbols[index - 1].replacingOccurrences(of: " ", with: "")
-            return "\(month)_\(viewModel.selectedYear)"
-        case .year:
-            return "\(viewModel.selectedYear)"
-        }
-    }
-
-    func makeProfitCSV() -> String {
-        var rows: [[String]] = [[
-            "Metric",
-            "Amount"
-        ]]
-
+    private func makeProfitRows() -> [[String]] {
         let summary = viewModel.summary
-        rows.append(["Revenue Gross", summary.revenueGross.plainString])
-        rows.append(["Revenue Net", summary.revenueNet.plainString])
-        rows.append(["Expense Total", summary.expenseTotal.plainString])
-        rows.append(["Expense GST", summary.expenseGST.plainString])
-        rows.append(["Expense Net", summary.expenseNet.plainString])
-        rows.append(["Profit", summary.profit.plainString])
-        rows.append(["Profit %", formattedPercent(summary.profitPercentage)])
+        var rows: [[String]] = [
+            ["Metric", "Amount"],
+            ["Revenue Gross", summary.revenueGross.plainString],
+            ["Revenue Net", summary.revenueNet.plainString],
+            ["Expense Total", summary.expenseTotal.plainString],
+            ["Expense GST", summary.expenseGST.plainString],
+            ["Expense Net", summary.expenseNet.plainString],
+            ["Profit", summary.profit.plainString],
+            ["Profit %", percentOrNA(summary.profitPercentage)]
+        ]
 
-        if viewModel.selectedFilter == .year, !viewModel.monthlyBreakdown.isEmpty {
-            rows.append(["", ""])
-            rows.append([
-                "Month",
-                "Revenue Gross",
-                "Revenue Net",
-                "Expense Total",
-                "Expense GST",
-                "Expense Net",
-                "Profit",
-                "Profit %"
-            ])
+        guard viewModel.selectedPeriod == .year, !viewModel.monthlyBreakdown.isEmpty else { return rows }
 
-            for breakdown in viewModel.monthlyBreakdown {
-                rows.append([
-                    viewModel.monthName(for: breakdown.month),
-                    breakdown.revenueGross.plainString,
-                    breakdown.revenueNet.plainString,
-                    breakdown.expenseTotal.plainString,
-                    breakdown.expenseGST.plainString,
-                    (breakdown.expenseTotal - breakdown.expenseGST).plainString,
-                    breakdown.profit.plainString,
-                    formattedPercent(breakdown.profitPercentage)
-                ])
-            }
-        }
-
-        return CSVExporting.makeCSV(from: rows)
+        rows.append(["", ""])
+        rows.append(Self.monthlyHeader)
+        rows.append(contentsOf: viewModel.monthlyBreakdown.map { breakdown in
+            let summary = breakdown.summary
+            return [
+                viewModel.monthName(for: breakdown.month),
+                summary.revenueGross.plainString,
+                summary.revenueNet.plainString,
+                summary.expenseTotal.plainString,
+                summary.expenseGST.plainString,
+                summary.expenseNet.plainString,
+                summary.profit.plainString,
+                percentOrNA(summary.profitPercentage)
+            ]
+        })
+        return rows
     }
 
-    func uploadProfitCSV(content: String, filename: String) async {
-        let transferService = await MainActor.run { driveConnector.transferService }
-        let state = await MainActor.run { driveConnector.state }
-        guard state == .linked else { return }
+    private static let monthlyHeader = [
+        "Month",
+        "Revenue Gross",
+        "Revenue Net",
+        "Expense Total",
+        "Expense GST",
+        "Expense Net",
+        "Profit",
+        "Profit %"
+    ]
 
-        do {
-            try await CSVExporting.uploadToDrive(content: content,
-                                                 filename: filename,
-                                                 transferService: transferService)
-            await MainActor.run { exportErrorMessage = nil }
-        } catch {
-            await MainActor.run {
-                exportErrorMessage = error.localizedDescription
-            }
-        }
-    }
-
-    func formattedPercent(_ value: Decimal?) -> String {
-        guard let value else { return "N/A" }
-        let ratio = (value as NSDecimalNumber).doubleValue
-        return ratio.formatted(.percent.precision(.fractionLength(0...1)))
+    private func percentOrNA(_ value: Decimal?) -> String {
+        ProfitAnalyticsViewModel.percentageText(value) ?? "N/A"
     }
 }
-
-private let profitWeekFilenameFormatter: DateFormatter = {
-    let formatter = DateFormatter()
-    formatter.dateFormat = "MMM_dd_yyyy"
-    return formatter
-}()
-
-private let profitShortMonthSymbols: [String] = {
-    let formatter = DateFormatter()
-    return formatter.shortMonthSymbols
-}()
 
 private struct ProfitMonthRow: View {
     let monthName: String
@@ -384,15 +227,9 @@ private struct ProfitMonthRow: View {
                     .font(.subheadline.weight(.semibold))
             }
 
-            if let percentageText {
-                Text("\(percentageText) of revenue")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            } else {
-                Text("No revenue recorded for this month.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
+            Text(percentageText.map { "\($0) of revenue" } ?? "No revenue recorded for this month.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
         }
         .padding(.vertical, 4)
     }

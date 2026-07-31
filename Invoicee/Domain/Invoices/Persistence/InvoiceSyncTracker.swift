@@ -9,6 +9,7 @@ actor InvoiceSyncTracker: InvoiceSyncStatusProvider {
     }
 
     private let storageKey: String
+    /// `UserDefaults` is thread-safe, so it is shared across isolation domains.
     nonisolated(unsafe) private let userDefaults: UserDefaults
     private var records: [UUID: Record]
 
@@ -18,11 +19,9 @@ actor InvoiceSyncTracker: InvoiceSyncStatusProvider {
 
         if let data = userDefaults.data(forKey: storageKey),
            let stored = try? JSONDecoder().decode([String: Record].self, from: data) {
-            let mapped = stored.compactMap { (key, value) -> (UUID, Record)? in
-                guard let uuid = UUID(uuidString: key) else { return nil }
-                return (uuid, value)
-            }
-            records = Dictionary(uniqueKeysWithValues: mapped)
+            records = Dictionary(uniqueKeysWithValues: stored.compactMap { key, value in
+                UUID(uuidString: key).map { ($0, value) }
+            })
         } else {
             records = [:]
         }
@@ -43,85 +42,38 @@ actor InvoiceSyncTracker: InvoiceSyncStatusProvider {
     }
 
     func removeRecord(for id: UUID) {
-        records.removeValue(forKey: id)
+        guard records.removeValue(forKey: id) != nil else { return }
         persist()
     }
 
+    /// Highest upload increment seen per base file name, so new uploads keep counting up.
     func highestIncrementLookup() -> [String: Int] {
         var lookup: [String: Int] = [:]
         for record in records.values {
-            if let path = record.imagePath,
-               let parsed = parseAttachmentPath(path) {
-                let current = lookup[parsed.baseName] ?? 0
-                lookup[parsed.baseName] = max(current, parsed.increment)
-            }
-            if let path = record.pdfPath,
-               let parsed = parseAttachmentPath(path) {
-                let current = lookup[parsed.baseName] ?? 0
-                lookup[parsed.baseName] = max(current, parsed.increment)
+            for path in [record.imagePath, record.pdfPath] {
+                guard let path, let parsed = DriveUploadMetadata.parseFileName(from: path) else { continue }
+                lookup[parsed.baseName] = max(lookup[parsed.baseName] ?? 0, parsed.increment)
             }
         }
         return lookup
     }
 
     func reset() {
+        guard !records.isEmpty else { return }
         records.removeAll()
         persist()
     }
 
     func syncedInvoiceIDs(for invoices: [CapturedInvoice]) async -> Set<UUID> {
-        var result: Set<UUID> = []
-        for invoice in invoices {
-            if isUpToDate(invoice) {
-                result.insert(invoice.id)
-            }
-        }
-        return result
+        Set(invoices.lazy.filter(isUpToDate).map(\.id))
     }
 
     private func persist() {
         let stringKeyed = Dictionary(uniqueKeysWithValues: records.map { ($0.key.uuidString, $0.value) })
-        let encoded = try? JSONEncoder().encode(stringKeyed)
-
-        Task { @MainActor in
-            if let data = encoded {
-                userDefaults.set(data, forKey: storageKey)
-            } else {
-                userDefaults.removeObject(forKey: storageKey)
-            }
-        }
-    }
-
-    private func parseAttachmentPath(_ path: String) -> DriveUploadMetadata.ParsedFileName? {
-        let fileNameWithExtension = path.split(separator: "/").last.map(String.init) ?? path
-        let fileName: String
-        if let dotIndex = fileNameWithExtension.lastIndex(of: ".") {
-            fileName = String(fileNameWithExtension[..<dotIndex])
+        if let data = try? JSONEncoder().encode(stringKeyed) {
+            userDefaults.set(data, forKey: storageKey)
         } else {
-            fileName = fileNameWithExtension
+            userDefaults.removeObject(forKey: storageKey)
         }
-
-        let components = fileName.split(separator: "_")
-        guard components.count >= 4 else { return nil }
-
-        var imageNumber: Int? = nil
-        var incrementComponentIndex = components.count - 1
-        let lastComponent = components[incrementComponentIndex]
-
-        if lastComponent.hasPrefix("image") {
-            let suffix = lastComponent.dropFirst("image".count)
-            guard let value = Int(suffix) else { return nil }
-            imageNumber = value
-            incrementComponentIndex -= 1
-        }
-
-        guard incrementComponentIndex >= 0,
-              let incrementValue = Int(components[incrementComponentIndex]) else { return nil }
-
-        let baseComponents = components[..<incrementComponentIndex]
-        guard !baseComponents.isEmpty else { return nil }
-        let baseName = baseComponents.joined(separator: "_")
-
-        return DriveUploadMetadata.ParsedFileName(baseName: baseName, increment: incrementValue, imageNumber: imageNumber)
     }
 }

@@ -18,22 +18,23 @@ final class RevenueFirestoreStore: RevenueStoring {
     }
 
     func fetchEntries(for userID: String) async throws -> [RevenueDayEntry] {
-        // Firestore may require a composite index when combining `where` + `order`.
-        // Filter by user ID and sort locally to avoid that dependency.
+        // Firestore would require a composite index to combine `where` with `order`, so
+        // this filters by user and leaves ordering to the caller.
         let snapshot = try await collection()
             .whereField("userID", isEqualTo: userID)
             .getDocuments()
 
-        return snapshot.documents.compactMap { document in
-            Self.entry(from: document.data(), documentID: document.documentID)
+        return snapshot.documents.compactMap {
+            Self.entry(from: $0.data(), documentID: $0.documentID)
         }
     }
 
     func save(date: Date, streams: [RevenueStreamValue], documentID: String?, userID: String) async throws -> RevenueDayEntry {
+        // One document per user per day, so re-saving a day overwrites rather than adding.
         let docID = documentID ?? Self.documentID(for: userID, date: date)
-        let document = collection().document(docID)
-        let data = Self.payload(date: date, streams: streams, userID: userID)
-        try await document.setData(data, merge: true)
+        try await collection()
+            .document(docID)
+            .setData(Self.payload(date: date, streams: streams, userID: userID), merge: true)
         return RevenueDayEntry(documentID: docID, date: date, streams: streams)
     }
 
@@ -44,15 +45,11 @@ final class RevenueFirestoreStore: RevenueStoring {
     init() {}
 
     func fetchEntries(for userID: String) async throws -> [RevenueDayEntry] {
-        throw NSError(domain: "RevenueFirestoreStore",
-                      code: 0,
-                      userInfo: [NSLocalizedDescriptionKey: "FirebaseFirestore not available on this platform."])
+        throw FirestoreUnavailableError()
     }
 
     func save(date: Date, streams: [RevenueStreamValue], documentID: String?, userID: String) async throws -> RevenueDayEntry {
-        throw NSError(domain: "RevenueFirestoreStore",
-                      code: 0,
-                      userInfo: [NSLocalizedDescriptionKey: "FirebaseFirestore not available on this platform."])
+        throw FirestoreUnavailableError()
     }
 #endif
 }
@@ -60,46 +57,30 @@ final class RevenueFirestoreStore: RevenueStoring {
 #if canImport(FirebaseFirestore)
 private extension RevenueFirestoreStore {
     static func payload(date: Date, streams: [RevenueStreamValue], userID: String) -> [String: Any] {
-        let streamArray: [[String: Any]] = streams.map { stream in
-            [
-                "name": stream.name,
-                "amount": NSDecimalNumber(decimal: stream.amount).doubleValue
-            ]
-        }
-
-        return [
+        [
             "userID": userID,
             "date": Timestamp(date: date),
-            "streams": streamArray,
+            "streams": streams.map { ["name": $0.name, "amount": $0.amount.doubleValue] },
             "updatedAt": Timestamp(date: Date())
         ]
     }
 
     static func entry(from data: [String: Any], documentID: String) -> RevenueDayEntry? {
         guard let timestamp = data["date"] as? Timestamp else { return nil }
-        let date = timestamp.dateValue()
-        let streamData = data["streams"] as? [[String: Any]] ?? []
 
-        let streams: [RevenueStreamValue] = streamData.compactMap { value in
+        let streams = (data["streams"] as? [[String: Any]] ?? []).compactMap { value -> RevenueStreamValue? in
             guard let name = value["name"] as? String else { return nil }
-            let amountValue = value["amount"] as? Double ?? 0
-            return RevenueStreamValue(name: name, amount: Decimal(amountValue))
+            return RevenueStreamValue(name: name,
+                                      amount: Decimal(roundedFrom: value["amount"] as? Double ?? 0))
         }
 
-        return RevenueDayEntry(documentID: documentID, date: date, streams: streams)
+        return RevenueDayEntry(documentID: documentID,
+                               date: timestamp.dateValue(),
+                               streams: streams)
     }
 
     static func documentID(for userID: String, date: Date) -> String {
-        let dayKey = dayFormatter.string(from: date)
-        return "\(userID)_\(dayKey)"
+        "\(userID)_\(ReportingDateFormatter.isoDay(date))"
     }
-
-    static let dayFormatter: DateFormatter = {
-        let formatter = DateFormatter()
-        formatter.calendar = Calendar(identifier: .gregorian)
-        formatter.locale = Locale(identifier: "en_US_POSIX")
-        formatter.dateFormat = "yyyy-MM-dd"
-        return formatter
-    }()
 }
 #endif

@@ -1,15 +1,11 @@
 internal import SwiftUI
-import UniformTypeIdentifiers
 
 /// Displays revenue summaries and daily entries with editing support.
 struct RevenueTabView: View {
     @EnvironmentObject private var driveConnector: GoogleDriveConnector
     @StateObject private var viewModel: RevenueViewModel
-    private let monthSymbols = Calendar.current.monthSymbols
+    @StateObject private var export = CSVExportController()
     @State private var isShowingMonthPicker = false
-    @State private var isExportingCSV = false
-    @State private var exportDocument = CSVDocument(text: "")
-    @State private var exportErrorMessage: String?
 
     init(viewModel: @autoclosure @escaping () -> RevenueViewModel) {
         _viewModel = StateObject(wrappedValue: viewModel())
@@ -50,22 +46,15 @@ struct RevenueTabView: View {
                 await viewModel.refresh()
             }
         }
-        .fileExporter(isPresented: $isExportingCSV,
-                      document: exportDocument,
-                      contentType: .commaSeparatedText,
-                      defaultFilename: revenueExportFilename) { result in
-            if case let .failure(error) = result {
-                exportErrorMessage = error.localizedDescription
-            }
-        }
+        .csvExporter(export)
     }
 
     @ViewBuilder
     private var content: some View {
-        if !viewModel.canRecordRevenue {
-            linkPrompt
-        } else {
+        if viewModel.canRecordRevenue {
             revenueList
+        } else {
+            LinkPromptView(message: "Link Google Drive to start tracking revenue.")
         }
     }
 
@@ -73,41 +62,9 @@ struct RevenueTabView: View {
         List {
             filterControls
             summarySection
-
-            Section(viewModel.selectedFilter == .year ? "Monthly Revenue" : "Daily Revenue") {
-                if viewModel.listEntries.isEmpty {
-                    Label("No revenue recorded yet.", systemImage: "chart.line.uptrend.xyaxis")
-                        .foregroundStyle(.secondary)
-                        .padding(.vertical, 8)
-                } else {
-                    ForEach(viewModel.listEntries) { entry in
-                        RevenueEntryRow(title: viewModel.displayTitle(for: entry),
-                                        total: entry.total.formattedCurrency(),
-                                        subtitle: viewModel.formattedStreams(for: entry))
-                            .contentShape(Rectangle())
-                            .onTapGesture {
-                                guard viewModel.selectedFilter != .year else { return }
-                                viewModel.beginAddingRevenue(for: entry.date)
-                            }
-                    }
-                }
-            }
-
-            if let error = viewModel.errorMessage {
-                Section {
-                    Label(error, systemImage: "exclamationmark.triangle")
-                        .foregroundColor(.orange)
-                        .font(.footnote)
-                }
-            }
-
-            if let exportErrorMessage {
-                Section {
-                    Label(exportErrorMessage, systemImage: "exclamationmark.triangle")
-                        .foregroundColor(.orange)
-                        .font(.footnote)
-                }
-            }
+            entriesSection
+            WarningSection(viewModel.errorMessage)
+            WarningSection(export.errorMessage)
         }
         .listStyle(.insetGrouped)
         .overlay {
@@ -117,91 +74,56 @@ struct RevenueTabView: View {
         }
         .background(Color.invoiceBackground)
         .sheet(isPresented: $isShowingMonthPicker) {
-            NavigationStack {
-                VStack {
-                    Text("Select Month")
-                        .font(.headline)
-                        .padding(.top)
+            MonthYearPickerSheet(month: $viewModel.selectedMonth,
+                                 year: $viewModel.selectedYear,
+                                 years: viewModel.availableYears)
+        }
+    }
 
-                    HStack(spacing: 0) {
-                        Picker("Month", selection: $viewModel.selectedMonth) {
-                            ForEach(1...12, id: \.self) { month in
-                                Text(monthSymbols[month - 1]).tag(month)
-                            }
+    private var entriesSection: some View {
+        Section(viewModel.selectedPeriod == .year ? "Monthly Revenue" : "Daily Revenue") {
+            if viewModel.listEntries.isEmpty {
+                Label("No revenue recorded yet.", systemImage: "chart.line.uptrend.xyaxis")
+                    .foregroundStyle(.secondary)
+                    .padding(.vertical, 8)
+            } else {
+                ForEach(viewModel.listEntries) { entry in
+                    RevenueEntryRow(title: viewModel.displayTitle(for: entry),
+                                    total: entry.total.formattedCurrency(),
+                                    streams: viewModel.formattedStreams(for: entry))
+                        .contentShape(Rectangle())
+                        .onTapGesture {
+                            // Yearly rows are rollups of many days, so there is no single
+                            // entry for the editor to open.
+                            guard viewModel.rowsAreEditable else { return }
+                            viewModel.beginAddingRevenue(for: entry.date)
                         }
-                        .pickerStyle(.wheel)
-                        .frame(maxWidth: .infinity)
-                        .frame(height: 180)
-                        .clipped()
-
-                        Picker("Year", selection: $viewModel.selectedYear) {
-                            ForEach(viewModel.availableYears, id: \.self) { year in
-                                Text(verbatim: String(year)).tag(year)
-                            }
-                        }
-                        .pickerStyle(.wheel)
-                        .frame(maxWidth: .infinity)
-                        .frame(height: 180)
-                        .clipped()
-                    }
-                    .padding(.horizontal)
-
-                    Spacer()
-                }
-                .toolbar {
-                    ToolbarItem(placement: .confirmationAction) {
-                        Button("Done") {
-                            isShowingMonthPicker = false
-                        }
-                    }
                 }
             }
-            .presentationDetents([.height(320), .medium])
         }
     }
 
     private var filterControls: some View {
         Section {
             VStack(alignment: .leading, spacing: 12) {
-                Picker("Period", selection: $viewModel.selectedFilter) {
-                    ForEach(RevenueViewModel.SummaryFilter.allCases) { filter in
-                        Text(filter.displayName).tag(filter)
+                Picker("Period", selection: $viewModel.selectedPeriod) {
+                    ForEach(ReportingPeriod.allCases) { period in
+                        Text(period.displayName).tag(period)
                     }
                 }
                 .pickerStyle(.segmented)
 
-                switch viewModel.selectedFilter {
-                case .month:
-                    Button {
-                        isShowingMonthPicker = true
-                    } label: {
-                        HStack {
-                            Image(systemName: "calendar")
-                            Text(verbatim: "\(monthSymbols[max(0, min(viewModel.selectedMonth - 1, monthSymbols.count - 1))]) \(viewModel.selectedYear)")
-                                .font(.callout)
-                                .foregroundStyle(.primary)
-                            Spacer()
-                            Image(systemName: "chevron.down")
-                                .font(.footnote)
-                                .foregroundStyle(.secondary)
-                        }
-                        .padding(.vertical, 8)
-                        .padding(.horizontal, 12)
-                        .background(Color.secondary.opacity(0.1))
-                        .clipShape(RoundedRectangle(cornerRadius: 10))
-                    }
-                    .buttonStyle(.plain)
-                case .year:
-                    Picker("Year", selection: $viewModel.selectedYear) {
-                        ForEach(viewModel.availableYears, id: \.self) { year in
-                            Text(verbatim: String(year)).tag(year)
-                        }
-                    }
-                    .pickerStyle(.menu)
-                default:
+                switch viewModel.selectedPeriod {
+                case .week:
                     Text(viewModel.summarySubtitle)
                         .font(.caption)
                         .foregroundStyle(.secondary)
+                case .month:
+                    MonthPickerButton(title: "\(ReportingDateFormatter.name(for: viewModel.selectedMonth)) \(viewModel.selectedYear)") {
+                        isShowingMonthPicker = true
+                    }
+                case .year:
+                    YearMenuButton(selection: $viewModel.selectedYear, years: viewModel.availableYears)
                 }
             }
             .padding(.vertical, 4)
@@ -220,18 +142,23 @@ struct RevenueTabView: View {
                             .foregroundStyle(.secondary)
                     }
                     Spacer()
-                    Text(viewModel.summaryTotalFormatted)
-                        .font(.system(size: 28, weight: .bold, design: .rounded))
+                    VStack(alignment: .trailing, spacing: 2) {
+                        Text(viewModel.summaryTotalFormatted)
+                            .font(.system(size: 28, weight: .bold, design: .rounded))
+                        Text("Plus \(viewModel.summaryGSTFormatted) GST")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
                 }
 
-                if viewModel.streamTotalsForSelection.isEmpty {
+                let streams = viewModel.streamTotalsForSelection
+                if streams.isEmpty {
                     Text("No revenue streams recorded for this period.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                         .padding(.top, 4)
                 } else {
-                    RevenueStreamBreakdownTable(streams: viewModel.streamTotalsForSelection,
-                                                total: viewModel.summaryTotal)
+                    RevenueStreamBreakdownTable(streams: streams, total: viewModel.summaryTotal)
                         .padding(.top, 8)
                 }
             }
@@ -239,12 +166,56 @@ struct RevenueTabView: View {
         }
     }
 
-    private var linkPrompt: some View {
+    private func startRevenueExport() {
+        let entries = viewModel.listEntries
+        guard !entries.isEmpty else { return }
+        export.export(rows: makeRevenueRows(from: entries),
+                      filename: "revenue_\(periodIdentifier).csv",
+                      mirroringTo: driveConnector)
+    }
+
+    private var periodIdentifier: String {
+        switch viewModel.selectedPeriod {
+        case .week: ReportingDateFormatter.weekIdentifier(viewModel.currentWeekRange)
+        case .month: ReportingDateFormatter.monthIdentifier(month: viewModel.selectedMonth, year: viewModel.selectedYear)
+        case .year: "\(viewModel.selectedYear)"
+        }
+    }
+
+    private func makeRevenueRows(from entries: [RevenueDayEntry]) -> [[String]] {
+        let isYearly = viewModel.selectedPeriod == .year
+        var rows: [[String]] = [[isYearly ? "Month" : "Date", "Stream", "Amount"]]
+        var total: Decimal = .zero
+
+        for entry in entries {
+            let label = isYearly
+                ? ReportingDateFormatter.monthAndYear(entry.date)
+                : ReportingDateFormatter.isoDay(entry.date)
+
+            if entry.streams.isEmpty {
+                rows.append([label, "Total", entry.total.plainString])
+            } else {
+                rows.append(contentsOf: entry.streams.map { [label, $0.name, $0.amount.plainString] })
+                rows.append([label, "TOTAL", entry.total.plainString])
+            }
+            total += entry.total
+        }
+
+        rows.append(["", "OVERALL TOTAL", total.plainString])
+        return rows
+    }
+}
+
+/// Shown in place of a report when Drive is not linked and the data lives remotely.
+struct LinkPromptView: View {
+    let message: String
+
+    var body: some View {
         VStack(spacing: 16) {
             Image(systemName: "link.circle")
                 .font(.system(size: 48))
                 .foregroundStyle(.secondary)
-            Text("Link Google Drive to start tracking revenue.")
+            Text(message)
                 .multilineTextAlignment(.center)
                 .foregroundStyle(.secondary)
         }
@@ -252,135 +223,23 @@ struct RevenueTabView: View {
     }
 }
 
-private extension RevenueTabView {
-    func startRevenueExport() {
-        let entries = viewModel.listEntries
-        guard !entries.isEmpty else { return }
-
-        let csvContent = makeRevenueCSV(from: entries)
-        exportDocument = CSVDocument(text: csvContent)
-        isExportingCSV = true
-
-        let filename = revenueExportFilename
-        Task {
-            await uploadRevenueCSV(content: csvContent, filename: filename)
-        }
-    }
-
-    var revenueExportFilename: String {
-        "revenue_\(revenuePeriodIdentifier).csv"
-    }
-
-    var revenuePeriodIdentifier: String {
-        switch viewModel.selectedFilter {
-        case .week:
-            if let range = viewModel.currentWeekRange {
-                let start = weekFilenameFormatter.string(from: range.start)
-                let end = weekFilenameFormatter.string(from: range.end)
-                return "Week_\(start)_\(end)"
-            }
-            return "Week_Current"
-        case .month:
-            let monthIndex = max(1, min(viewModel.selectedMonth, revenueShortMonthSymbols.count))
-            let month = revenueShortMonthSymbols[monthIndex - 1].replacingOccurrences(of: " ", with: "")
-            return "\(month)_\(viewModel.selectedYear)"
-        case .year:
-            return "\(viewModel.selectedYear)"
-        }
-    }
-
-    func makeRevenueCSV(from entries: [RevenueDayEntry]) -> String {
-        let periodHeader = viewModel.selectedFilter == .year ? "Month" : "Date"
-        var rows: [[String]] = [[periodHeader, "Stream", "Amount"]]
-        var total: Decimal = .zero
-
-        for entry in entries {
-            let label = entryLabel(for: entry)
-            if entry.streams.isEmpty {
-                rows.append([label, "Total", entry.total.plainString])
-                total += entry.total
-                continue
-            }
-
-            for stream in entry.streams {
-                rows.append([label, stream.name, stream.amount.plainString])
-            }
-            rows.append([label, "TOTAL", entry.total.plainString])
-            total += entry.total
-        }
-
-        rows.append(["", "OVERALL TOTAL", total.plainString])
-        return CSVExporting.makeCSV(from: rows)
-    }
-
-    func entryLabel(for entry: RevenueDayEntry) -> String {
-        switch viewModel.selectedFilter {
-        case .year:
-            return revenueMonthFormatter.string(from: entry.date)
-        default:
-            return revenueDayFormatter.string(from: entry.date)
-        }
-    }
-
-    func uploadRevenueCSV(content: String, filename: String) async {
-        let transferService = await MainActor.run { driveConnector.transferService }
-        let state = await MainActor.run { driveConnector.state }
-        guard state == .linked else { return }
-
-        do {
-            try await CSVExporting.uploadToDrive(content: content,
-                                                 filename: filename,
-                                                 transferService: transferService)
-            await MainActor.run { exportErrorMessage = nil }
-        } catch {
-            await MainActor.run {
-                exportErrorMessage = error.localizedDescription
-            }
-        }
-    }
-}
-
-private let revenueDayFormatter: DateFormatter = {
-    let formatter = DateFormatter()
-    formatter.dateFormat = "yyyy-MM-dd"
-    return formatter
-}()
-
-private let revenueMonthFormatter: DateFormatter = {
-    let formatter = DateFormatter()
-    formatter.dateFormat = "MMM yyyy"
-    return formatter
-}()
-
-private let weekFilenameFormatter: DateFormatter = {
-    let formatter = DateFormatter()
-    formatter.dateFormat = "MMM_dd_yyyy"
-    return formatter
-}()
-
-private let revenueShortMonthSymbols: [String] = {
-    let formatter = DateFormatter()
-    return formatter.shortMonthSymbols
-}()
-
 private struct RevenueEntryRow: View {
     let title: String
     let total: String
-    let subtitle: [String]
+    let streams: [String]
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack(alignment: .firstTextBaseline) {
                 Text(title)
                     .font(.subheadline)
-                    .foregroundStyle(.primary)
                 Spacer()
                 Text(total)
                     .font(.subheadline.weight(.semibold))
             }
 
-            if !subtitle.isEmpty {
-                Text(subtitle.joined(separator: " • "))
+            if !streams.isEmpty {
+                Text(streams.joined(separator: " • "))
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -396,24 +255,15 @@ private struct RevenueStreamBreakdownTable: View {
     var body: some View {
         VStack(spacing: 0) {
             HStack {
-                Text("Stream")
-                    .font(.caption.smallCaps())
-                    .foregroundStyle(.secondary)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                Text("Amount")
-                    .font(.caption.smallCaps())
-                    .foregroundStyle(.secondary)
-                    .frame(width: 100, alignment: .trailing)
-                Text("%")
-                    .font(.caption.smallCaps())
-                    .foregroundStyle(.secondary)
-                    .frame(width: 60, alignment: .trailing)
+                header("Stream", width: nil)
+                header("Amount", width: 100)
+                header("%", width: 60)
             }
             .padding(.vertical, 6)
 
             Divider()
 
-            ForEach(streams, id: \.name) { stream in
+            ForEach(streams) { stream in
                 HStack {
                     Text(stream.name)
                         .font(.subheadline)
@@ -422,29 +272,39 @@ private struct RevenueStreamBreakdownTable: View {
                     Text(stream.amount.formattedCurrency())
                         .font(.footnote)
                         .frame(width: 100, alignment: .trailing)
-                    Text(formattedPercent(for: stream.amount))
+                    Text(share(of: stream.amount))
                         .font(.footnote)
                         .frame(width: 60, alignment: .trailing)
                 }
                 .padding(.vertical, 6)
 
-                if stream.name != streams.last?.name {
+                if stream.id != streams.last?.id {
                     Divider()
                 }
             }
         }
     }
 
-    private func formattedPercent(for value: Decimal) -> String {
+    @ViewBuilder
+    private func header(_ title: String, width: CGFloat?) -> some View {
+        let text = Text(title)
+            .font(.caption.smallCaps())
+            .foregroundStyle(.secondary)
+        if let width {
+            text.frame(width: width, alignment: .trailing)
+        } else {
+            text.frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    private func share(of value: Decimal) -> String {
         guard total > 0 else { return "—" }
-        let ratio = (value as NSDecimalNumber).doubleValue / (total as NSDecimalNumber).doubleValue
-        return ratio.formatted(.percent.precision(.fractionLength(0...1)))
+        return ExpenseAnalyticsViewModel.percentText(value / total)
     }
 }
 
 private struct RevenueFormSheet: View {
     @ObservedObject var viewModel: RevenueViewModel
-    @Environment(\.dismiss) private var dismiss
 
     var body: some View {
         NavigationStack {
@@ -464,7 +324,7 @@ private struct RevenueFormSheet: View {
                         HStack(spacing: 12) {
                             TextField("Name", text: $stream.name)
                                 .textInputAutocapitalization(.words)
-                                .disableAutocorrection(true)
+                                .autocorrectionDisabled()
 
                             TextField("Amount", text: $stream.amountText)
                                 .keyboardType(.decimalPad)
@@ -492,17 +352,16 @@ private struct RevenueFormSheet: View {
                     Section {
                         Text(message)
                             .font(.footnote)
-                            .foregroundColor(.red)
+                            .foregroundStyle(.red)
                     }
                 }
             }
             .navigationTitle(viewModel.isEditingExistingForm ? "Edit Revenue" : "Add Revenue")
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button("Cancel") {
-                        viewModel.isPresentingForm = false
-                        dismiss()
-                    }
+                    // The sheet is driven by `isPresentingForm`, so clearing it is what
+                    // dismisses; calling `dismiss()` as well left the flag set on cancel.
+                    Button("Cancel") { viewModel.isPresentingForm = false }
                 }
                 ToolbarItem(placement: .confirmationAction) {
                     Button {
