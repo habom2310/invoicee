@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Invoicee</title>
+<meta name="description" content="Invoicee — invoice, expense and revenue tracking for iOS.">
+<style>
+  :root {
+    --ground: #F6F7F8;
+    --surface: #FFFFFF;
+    --ink: #17202A;
+    --ink-soft: #55636F;
+    --rule: #DDE3E8;
+    --accent: #1F5C8B;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --ground: #10161B;
+      --surface: #171F26;
+      --ink: #E3E9EE;
+      --ink-soft: #94A4B1;
+      --rule: #27313A;
+      --accent: #74AEDD;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--ground);
+    color: var(--ink);
+    font: 16px/1.65 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  .wrap { max-width: 40rem; margin: 0 auto; padding: 5rem 1.25rem 5rem; }
+  h1 { font-size: 2.4rem; margin: 0 0 .5rem; letter-spacing: -.025em; }
+  .tagline { color: var(--ink-soft); font-size: 1.1rem; margin: 0 0 2.5rem; max-width: 34ch; }
+  h2 {
+    font-size: .72rem;
+    text-transform: uppercase;
+    letter-spacing: .11em;
+    color: var(--ink-soft);
+    margin: 0 0 .9rem;
+  }
+  ul.feat { margin: 0 0 3rem; padding-left: 1.2rem; color: var(--ink-soft); }
+  ul.feat li { margin-bottom: .35rem; }
+  .links { display: flex; flex-direction: column; gap: .6rem; }
+  .links a {
+    display: block;
+    background: var(--surface);
+    border: 1px solid var(--rule);
+    border-radius: 5px;
+    padding: .85rem 1rem;
+    text-decoration: none;
+    color: var(--ink);
+    font-weight: 600;
+  }
+  .links a:hover { border-color: var(--accent); color: var(--accent); }
+  .links span { display: block; font-weight: 400; font-size: .87rem; color: var(--ink-soft); margin-top: .1rem; }
+  footer {
+    margin-top: 3.5rem;
+    padding-top: 1.25rem;
+    border-top: 1px solid var(--rule);
+    font-size: .85rem;
+    color: var(--ink-soft);
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <h1>Invoicee</h1>
+  <p class="tagline">Invoice, expense and revenue tracking for iPhone.</p>
+
+  <h2>What it does</h2>
+  <ul class="feat">
+    <li>Scan a receipt with the camera and pull the figures off it</li>
+    <li>Track totals, your share, and GST per invoice</li>
+    <li>Record daily revenue across multiple streams</li>
+    <li>See profit across a reporting period</li>
+    <li>Keep attachments in your own Google Drive, and export to CSV</li>
+  </ul>
+
+  <h2>Legal</h2>
+  <div class="links">
+    <a href="privacy.html">Privacy Policy<span>What the app stores, where it goes, and how to have it deleted</span></a>
+    <a href="terms.html">Terms of Service<span>Terms covering use of the app</span></a>
+  </div>
+
+  <footer>Support: <a href="mailto:CONTACT_EMAIL_HERE">CONTACT_EMAIL_HERE</a></footer>
+
+</div>
+</body>
+</html>

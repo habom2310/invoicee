@@ -1,0 +1,174 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Privacy Policy · Invoicee</title>
+<style>
+  :root {
+    --ground: #F6F7F8;
+    --surface: #FFFFFF;
+    --ink: #17202A;
+    --ink-soft: #55636F;
+    --rule: #DDE3E8;
+    --accent: #1F5C8B;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --ground: #10161B;
+      --surface: #171F26;
+      --ink: #E3E9EE;
+      --ink-soft: #94A4B1;
+      --rule: #27313A;
+      --accent: #74AEDD;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--ground);
+    color: var(--ink);
+    font: 16px/1.65 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  .wrap { max-width: 44rem; margin: 0 auto; padding: 3rem 1.25rem 5rem; }
+  a { color: var(--accent); }
+  .back {
+    display: inline-block;
+    font-size: .85rem;
+    text-decoration: none;
+    margin-bottom: 2rem;
+    color: var(--ink-soft);
+  }
+  .back:hover { color: var(--accent); }
+  h1 { font-size: 2rem; line-height: 1.15; margin: 0 0 .4rem; letter-spacing: -.02em; }
+  .dateline { color: var(--ink-soft); font-size: .9rem; margin: 0 0 2.25rem; }
+  h2 {
+    font-size: 1.15rem;
+    margin: 2.5rem 0 .6rem;
+    padding-top: 1.4rem;
+    border-top: 1px solid var(--rule);
+    letter-spacing: -.01em;
+  }
+  h3 { font-size: 1rem; margin: 1.5rem 0 .35rem; }
+  p, li { color: var(--ink-soft); }
+  p { margin: 0 0 .9rem; }
+  strong { color: var(--ink); font-weight: 600; }
+  ul { margin: 0 0 1rem; padding-left: 1.3rem; }
+  li { margin-bottom: .4rem; }
+  .lede {
+    background: var(--surface);
+    border: 1px solid var(--rule);
+    border-left: 3px solid var(--accent);
+    border-radius: 4px;
+    padding: 1.1rem 1.25rem;
+    margin-bottom: 1rem;
+  }
+  .lede p:last-child { margin-bottom: 0; }
+  code {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: .875em;
+    background: var(--ground);
+    border: 1px solid var(--rule);
+    padding: .08em .35em;
+    border-radius: 3px;
+    color: var(--ink);
+  }
+  footer {
+    margin-top: 3.5rem;
+    padding-top: 1.25rem;
+    border-top: 1px solid var(--rule);
+    font-size: .85rem;
+    color: var(--ink-soft);
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<a class="back" href="./">← Invoicee</a>
+
+<h1>Privacy Policy</h1>
+<p class="dateline">Effective 7 September 2026</p>
+
+<div class="lede">
+  <p><strong>The short version.</strong> Invoicee is an invoice and expense tracker. Your receipt images and PDFs are stored on your device and in <em>your own</em> Google Drive — never on our servers. We store the figures typed or scanned from those receipts (supplier, amounts, dates) so they sync between your devices. We run no analytics, no advertising, and no tracking, and we do not sell or share your data with anyone.</p>
+</div>
+
+<h2>What stays only on your device</h2>
+<p>The following never leaves your iPhone:</p>
+<ul>
+  <li>Receipt and invoice <strong>images and PDFs</strong> — the file contents themselves</li>
+  <li>Your local invoice archive</li>
+  <li>Preferences such as upload image quality and your invoice categories</li>
+  <li>Your Google sign-in tokens and the display name and picture from your Google profile, held in the iOS Keychain</li>
+</ul>
+
+<h2>What goes to your own Google Drive</h2>
+<p>When you link a Google account, Invoicee uploads each invoice's image or PDF to a folder named <code>Invoicee</code> in <strong>your</strong> Drive, organised by year and month. CSV exports go to the same place.</p>
+<p>Invoicee requests the <code>drive.file</code> permission, which is the narrowest Drive scope Google offers: the app can only see and manage files it created itself. It cannot read anything else in your Drive. These files are yours — you can open, move, or delete them without using Invoicee, and deleting the app does not remove them.</p>
+
+<h2>What we store on our servers</h2>
+<p>Invoice and revenue <em>records</em> — not the attachments — are stored in Google Cloud Firestore in a project we operate, so your data survives reinstalling the app and syncs across your devices. Specifically:</p>
+
+<h3>For each invoice</h3>
+<ul>
+  <li>Supplier name, category, and payment method</li>
+  <li>Total, your share of the total, and GST</li>
+  <li>Invoice date and last-edited time</li>
+  <li>Line items: description, quantity, unit price, line total</li>
+  <li>The <em>file name</em> of the attachment in your Drive, and whether an image or PDF exists — never the file itself</li>
+</ul>
+
+<h3>For each revenue entry</h3>
+<ul>
+  <li>The date, and the name and amount of each revenue stream</li>
+</ul>
+
+<h3>To identify the owner</h3>
+<ul>
+  <li>Your Firebase user ID and your Google account ID</li>
+</ul>
+
+<p>Access is enforced on the server: records are readable and writable only by the signed-in account that owns them.</p>
+
+<h2>Camera and photo library</h2>
+<p>Invoicee asks for camera access so you can scan a receipt, and photo library access so you can attach an image you already have. Text is recognised on your device. The resulting images follow the rules above — device and your own Drive, nowhere else.</p>
+
+<h2>What we don't do</h2>
+<ul>
+  <li>No analytics or usage-tracking SDKs are built into the app</li>
+  <li>No advertising, and no advertising identifiers</li>
+  <li>No tracking across other apps or websites</li>
+  <li>No selling, renting, or sharing of your data with third parties</li>
+  <li>No access to your Drive beyond the files Invoicee itself created</li>
+</ul>
+
+<h2>Who else handles your data</h2>
+<p>Google LLC processes data on our behalf, and only to make the app work:</p>
+<ul>
+  <li><strong>Firebase Authentication</strong> — verifies your Google sign-in</li>
+  <li><strong>Cloud Firestore</strong> — stores the invoice and revenue records listed above</li>
+  <li><strong>Google Drive API</strong> — stores your attachments in your own Drive</li>
+</ul>
+<p>Your use of Google's services is also governed by <a href="https://policies.google.com/privacy">Google's Privacy Policy</a>.</p>
+
+<h2>Keeping and deleting your data</h2>
+<p>Records are kept while your account is linked, so your history is there when you come back.</p>
+<p><strong>To remove data from your device</strong>, use <em>Unlink Google Drive</em> in the Profile tab. This deletes the locally stored invoices and your saved sign-in.</p>
+<p><strong>To delete the records held on our servers</strong>, email the address below from the Google account you linked, and we will delete them. Files already in your own Google Drive are under your control and can be deleted directly from Drive at any time.</p>
+
+<h2>Children</h2>
+<p>Invoicee is a business tool and is not directed at children. We do not knowingly collect information from anyone under 13.</p>
+
+<h2>Changes to this policy</h2>
+<p>If this policy changes materially, the effective date above will change and the current version will always be published at this address.</p>
+
+<h2>Contact</h2>
+<p>Questions, or a deletion request: <a href="mailto:CONTACT_EMAIL_HERE">CONTACT_EMAIL_HERE</a></p>
+
+<footer>Invoicee · <a href="./">Home</a> · <a href="terms.html">Terms of Service</a></footer>
+
+</div>
+</body>
+</html>
