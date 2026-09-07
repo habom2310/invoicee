@@ -56,22 +56,22 @@ struct ManualInvoiceFormView: View {
     private var amountFields: some View {
         Group {
             InvoiceFieldLabel("Total Amount")
-            InvoiceCurrencyField("Total amount", text: .optionalMoney($data.totalAmount) { _ in
+            InvoiceCurrencyField("Total amount", text: .optionalMoney($data.totalAmount, onChange: { _ in
                 // Our Amount tracks the total until the user overrides it, and the GST
                 // cap is a percentage of the total, so both react to a new total.
                 if !data.hasCustomOurAmount {
                     data.ourAmount = nil
                 }
                 data.gstAmount = GSTValidator.sanitizedAmount(for: data.gstAmount, total: data.totalAmount)
-            })
+            }))
 
             InvoiceFieldLabel("Our Amount")
             InvoiceCurrencyField("Our amount", text: ourAmountBinding)
 
             InvoiceFieldLabel("GST Amount")
-            InvoiceCurrencyField("GST amount", text: .optionalMoney($data.gstAmount) { entered in
+            InvoiceCurrencyField("GST amount", text: .optionalMoney($data.gstAmount, onChange: { entered in
                 data.gstAmount = GSTValidator.sanitizedAmount(for: entered, total: data.totalAmount)
-            })
+            }))
         }
     }
 

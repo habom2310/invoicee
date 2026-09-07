@@ -4,9 +4,9 @@ import FirebaseFirestore
 #endif
 
 protocol InvoiceFirestoreUploading {
-    func upload(invoice: CapturedInvoice, imageFileName: String?, pdfFileName: String?, userID: String) async throws
+    func upload(invoice: CapturedInvoice, imageFileName: String?, pdfFileName: String?, identity: SyncIdentity) async throws
     func delete(invoiceID: UUID) async throws
-    func fetchInvoices(for userID: String) async throws -> [CapturedInvoice]
+    func fetchInvoices(for identity: SyncIdentity) async throws -> [CapturedInvoice]
 }
 
 /// Raised when the app is built without Firestore, so the sync paths fail with a message
@@ -26,11 +26,11 @@ final class InvoiceFirestoreUploader: InvoiceFirestoreUploading {
         self.db = db
     }
 
-    func upload(invoice: CapturedInvoice, imageFileName: String?, pdfFileName: String?, userID: String) async throws {
+    func upload(invoice: CapturedInvoice, imageFileName: String?, pdfFileName: String?, identity: SyncIdentity) async throws {
         try await document(for: invoice.id).setData(Self.payload(from: invoice,
                                                                 imageFileName: imageFileName,
                                                                 pdfFileName: pdfFileName,
-                                                                userID: userID),
+                                                                identity: identity),
                                                     merge: true)
     }
 
@@ -38,20 +38,24 @@ final class InvoiceFirestoreUploader: InvoiceFirestoreUploading {
         try await document(for: invoiceID).delete()
     }
 
-    func fetchInvoices(for userID: String) async throws -> [CapturedInvoice] {
+    func fetchInvoices(for identity: SyncIdentity) async throws -> [CapturedInvoice] {
         let collection = db.collection(Self.collectionName)
-        var snapshot = try await collection.whereField("driveAccountID", isEqualTo: userID).getDocuments()
 
-        // Invoices written before `driveAccountID` existed carry only `userID`. Current
-        // uploads set both, so this second query only runs for an account whose documents
-        // all predate that field — or one with no invoices at all.
-        if snapshot.isEmpty {
-            snapshot = try await collection.whereField("userID", isEqualTo: userID).getDocuments()
+        // Two queries rather than one, because an account can straddle the migration:
+        // documents written by this build carry `ownerUID`, older ones only the Google
+        // account ID. Both filters mirror a clause in the security rules — Firestore
+        // rejects a query it cannot prove returns only permitted documents, so neither
+        // can be widened here without widening the rules too.
+        async let owned = collection.whereField("ownerUID", isEqualTo: identity.uid).getDocuments()
+        async let legacy = collection.whereField("driveAccountID", isEqualTo: identity.googleAccountID).getDocuments()
+
+        // Keyed by document ID: a document matching both filters must not come back twice.
+        var documents: [String: [String: Any]] = [:]
+        for document in try await owned.documents + legacy.documents {
+            documents[document.documentID] = document.data()
         }
 
-        return snapshot.documents.compactMap {
-            Self.invoice(from: $0.data(), documentID: $0.documentID)
-        }
+        return documents.compactMap { Self.invoice(from: $0.value, documentID: $0.key) }
     }
 
     private func document(for invoiceID: UUID) -> DocumentReference {
@@ -60,7 +64,7 @@ final class InvoiceFirestoreUploader: InvoiceFirestoreUploading {
 #else
     init() {}
 
-    func upload(invoice: CapturedInvoice, imageFileName: String?, pdfFileName: String?, userID: String) async throws {
+    func upload(invoice: CapturedInvoice, imageFileName: String?, pdfFileName: String?, identity: SyncIdentity) async throws {
         throw FirestoreUnavailableError()
     }
 
@@ -68,7 +72,7 @@ final class InvoiceFirestoreUploader: InvoiceFirestoreUploading {
         throw FirestoreUnavailableError()
     }
 
-    func fetchInvoices(for userID: String) async throws -> [CapturedInvoice] {
+    func fetchInvoices(for identity: SyncIdentity) async throws -> [CapturedInvoice] {
         throw FirestoreUnavailableError()
     }
 #endif
@@ -79,7 +83,7 @@ private extension InvoiceFirestoreUploader {
     static func payload(from invoice: CapturedInvoice,
                         imageFileName: String?,
                         pdfFileName: String?,
-                        userID: String) -> [String: Any] {
+                        identity: SyncIdentity) -> [String: Any] {
         let resolvedImageFileName = imageFileName ?? invoice.remoteImageFileName
         let resolvedPDFFileName = pdfFileName ?? invoice.remotePDFFileName
 
@@ -94,8 +98,12 @@ private extension InvoiceFirestoreUploader {
             "hasImage": invoice.imageData != nil,
             "hasPdf": invoice.pdfData != nil || resolvedPDFFileName != nil,
             "lastEdited": Timestamp(date: invoice.lastEdited),
-            "userID": userID,
-            "driveAccountID": userID,
+            // `ownerUID` is the only one the rules trust. The two Google-account fields
+            // stay so a document written here is still legible to older installs, and
+            // so the legacy read path keeps working through the migration.
+            "ownerUID": identity.uid,
+            "userID": identity.googleAccountID,
+            "driveAccountID": identity.googleAccountID,
             "last_updated": Timestamp(date: Date()),
             "items": invoice.items.map { item in
                 [

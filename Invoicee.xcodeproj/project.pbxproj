@@ -9,15 +9,31 @@
 /* Begin PBXBuildFile section */
 		9E2836B32E97DCFB00A16623 /* FirebaseCore in Frameworks */ = {isa = PBXBuildFile; productRef = 9E2836B22E97DCFB00A16623 /* FirebaseCore */; };
 		9E2836B52E97DCFB00A16623 /* FirebaseFirestore in Frameworks */ = {isa = PBXBuildFile; productRef = 9E2836B42E97DCFB00A16623 /* FirebaseFirestore */; };
+		9E2836B72E97DCFB00A16623 /* FirebaseAuth in Frameworks */ = {isa = PBXBuildFile; productRef = 9E2836B62E97DCFB00A16623 /* FirebaseAuth */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
 		9E6F90C92E8F81F80042F5C9 /* Invoicee.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Invoicee.app; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
+/* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
+		9E6F90CC2E8F81F80042F5C9 /* Exceptions for "Invoicee" folder in "Invoicee" target */ = {
+			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
+			membershipExceptions = (
+				app_icon.png,
+				Docs/ARCHITECTURE.md,
+				Docs/TESTING.md,
+			);
+			target = 9E6F90C82E8F81F80042F5C9 /* Invoicee */;
+		};
+/* End PBXFileSystemSynchronizedBuildFileExceptionSet section */
+
 /* Begin PBXFileSystemSynchronizedRootGroup section */
 		9E6F90CB2E8F81F80042F5C9 /* Invoicee */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
+			exceptions = (
+				9E6F90CC2E8F81F80042F5C9 /* Exceptions for "Invoicee" folder in "Invoicee" target */,
+			);
 			path = Invoicee;
 			sourceTree = "<group>";
 		};
@@ -30,6 +46,7 @@
 			files = (
 				9E2836B32E97DCFB00A16623 /* FirebaseCore in Frameworks */,
 				9E2836B52E97DCFB00A16623 /* FirebaseFirestore in Frameworks */,
+				9E2836B72E97DCFB00A16623 /* FirebaseAuth in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -74,6 +91,7 @@
 			packageProductDependencies = (
 				9E2836B22E97DCFB00A16623 /* FirebaseCore */,
 				9E2836B42E97DCFB00A16623 /* FirebaseFirestore */,
+				9E2836B62E97DCFB00A16623 /* FirebaseAuth */,
 			);
 			productName = Invoicee;
 			productReference = 9E6F90C92E8F81F80042F5C9 /* Invoicee.app */;
@@ -271,7 +289,7 @@
 				INFOPLIST_KEY_ITSAppUsesNonExemptEncryption = NO;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.business";
 				INFOPLIST_KEY_NSCameraUsageDescription = "Invoicee needs access to your camera to scan invoice receipts.";
-				INFOPLIST_KEY_NSPhotoLibraryAddUsageDescription = "Invoicee uses your photo library to store captured invoice images.";
+				INFOPLIST_KEY_NSPhotoLibraryUsageDescription = "Invoicee needs access to your photo library so you can attach an existing receipt or invoice image.";
 				"INFOPLIST_KEY_UIApplicationSceneManifest_Generation[sdk=iphoneos*]" = YES;
 				"INFOPLIST_KEY_UIApplicationSceneManifest_Generation[sdk=iphonesimulator*]" = YES;
 				"INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents[sdk=iphoneos*]" = YES;
@@ -323,7 +341,7 @@
 				INFOPLIST_KEY_ITSAppUsesNonExemptEncryption = NO;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.business";
 				INFOPLIST_KEY_NSCameraUsageDescription = "Invoicee needs access to your camera to scan invoice receipts.";
-				INFOPLIST_KEY_NSPhotoLibraryAddUsageDescription = "Invoicee uses your photo library to store captured invoice images.";
+				INFOPLIST_KEY_NSPhotoLibraryUsageDescription = "Invoicee needs access to your photo library so you can attach an existing receipt or invoice image.";
 				"INFOPLIST_KEY_UIApplicationSceneManifest_Generation[sdk=iphoneos*]" = YES;
 				"INFOPLIST_KEY_UIApplicationSceneManifest_Generation[sdk=iphonesimulator*]" = YES;
 				"INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents[sdk=iphoneos*]" = YES;
@@ -403,6 +421,11 @@
 			isa = XCSwiftPackageProductDependency;
 			package = 9E2836AF2E97DABF00A16623 /* XCRemoteSwiftPackageReference "firebase-ios-sdk" */;
 			productName = FirebaseFirestore;
+		};
+		9E2836B62E97DCFB00A16623 /* FirebaseAuth */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 9E2836AF2E97DABF00A16623 /* XCRemoteSwiftPackageReference "firebase-ios-sdk" */;
+			productName = FirebaseAuth;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};

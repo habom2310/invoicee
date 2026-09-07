@@ -80,11 +80,7 @@ final class ProfitAnalyticsViewModel: ObservableObject {
     }
 
     var availableYears: [Int] {
-        var years = Set(invoices.map { calendar.component(.year, from: $0.date) })
-        years.formUnion(revenueEntries.map { calendar.component(.year, from: $0.date) })
-        years.insert(calendar.component(.year, from: Date()))
-        years.insert(selectedYear)
-        return years.sorted()
+        periodOptions.availableYears(including: selectedYear)
     }
 
     private let invoiceArchive: InvoiceArchive
@@ -96,6 +92,9 @@ final class ProfitAnalyticsViewModel: ObservableObject {
     private var invoices: [CapturedInvoice] = []
     private var revenueEntries: [RevenueDayEntry] = []
     private var selectedExpenseMetric: ExpenseMetric
+    /// Rebuilt in `recomputeMetrics` rather than derived in `availableYears`, because the
+    /// year menu reads that property from `body` on every pass.
+    private var periodOptions: ReportingPeriodOptions
 
     init(invoiceArchive: InvoiceArchive,
          revenueStore: RevenueStoring,
@@ -108,6 +107,7 @@ final class ProfitAnalyticsViewModel: ObservableObject {
         self.metricStore = metricStore
         self.calendar = calendar
         selectedExpenseMetric = metricStore?.selectedMetric ?? .totalAmount
+        periodOptions = ReportingPeriodOptions(dates: [], calendar: calendar)
 
         let today = calendar.startOfDay(for: Date())
         selectedMonth = calendar.component(.month, from: today)
@@ -124,7 +124,7 @@ final class ProfitAnalyticsViewModel: ObservableObject {
 
     func refresh() async {
         guard !isLoading else { return }
-        guard isDriveLinked, let userID = driveConnector.currentAccountID else {
+        guard isDriveLinked, let identity = driveConnector.currentSyncIdentity else {
             // Expenses still summarise without Drive; only the revenue half is missing.
             revenueEntries = []
             errorMessage = Self.linkPromptMessage
@@ -140,7 +140,7 @@ final class ProfitAnalyticsViewModel: ObservableObject {
         }
 
         do {
-            revenueEntries = try await revenueStore.fetchEntries(for: userID)
+            revenueEntries = try await revenueStore.fetchEntries(for: identity)
                 .map { RevenueDayEntry(documentID: $0.documentID,
                                        date: calendar.startOfDay(for: $0.date),
                                        streams: $0.streams) }
@@ -252,6 +252,10 @@ final class ProfitAnalyticsViewModel: ObservableObject {
     // MARK: - Aggregation
 
     private func recomputeMetrics() {
+        // Both sides feed the year menu: an invoice-only year and a revenue-only year are
+        // each worth offering.
+        periodOptions = ReportingPeriodOptions(dates: invoices.map(\.date) + revenueEntries.map(\.date),
+                                               calendar: calendar)
         summary = selectedDateRange.map(summary(for:)) ?? ProfitSummary()
         monthlyBreakdown = selectedPeriod == .year ? breakdown(forYear: selectedYear) : []
     }

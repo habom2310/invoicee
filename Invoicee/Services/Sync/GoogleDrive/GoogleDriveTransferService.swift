@@ -2,7 +2,6 @@ import Foundation
 #if canImport(AuthenticationServices)
 import AuthenticationServices
 #endif
-import Security
 
 /// Drive-specific implementation of `CloudStorageTransferService`.
 final class GoogleDriveTransferService: NSObject, CloudStorageTransferService {
@@ -16,6 +15,9 @@ final class GoogleDriveTransferService: NSObject, CloudStorageTransferService {
         static let authorizationEndpoint = URL(string: "https://accounts.google.com/o/oauth2/v2/auth")!
         static let tokenEndpoint = URL(string: "https://oauth2.googleapis.com/token")!
         static let scopes: [String] = [
+            // `openid` is what makes Google return an `id_token`; Firebase needs one to
+            // establish the session Firestore rules are written against.
+            "openid",
             "https://www.googleapis.com/auth/drive.file",
             "https://www.googleapis.com/auth/userinfo.profile"
         ]
@@ -27,9 +29,13 @@ final class GoogleDriveTransferService: NSObject, CloudStorageTransferService {
     }
 
     private let credentialStore = GoogleDriveCredentialStore()
-    private var token: OAuthToken?
+    private let sessionAuthenticator: FirebaseSessionAuthenticating
+    private var token: GoogleOAuthToken?
     private(set) var userProfile: GoogleUserProfile?
     private(set) var lastFailureDescription: String?
+    /// Held between building the authorization URL and exchanging the code it returns.
+    /// One pair per attempt: reusing a verifier would defeat the point of having one.
+    private var pendingPKCE: PKCEChallenge?
     /// Resolved folder IDs keyed by parent + name. The parent must be part of the key:
     /// month folders are named "01"…"12" and would otherwise collide across years.
     private var folderCache: [String: String] = [:]
@@ -40,10 +46,25 @@ final class GoogleDriveTransferService: NSObject, CloudStorageTransferService {
     }
 
     var currentAccountName: String? {
-        userProfile?.name ?? userProfile?.given_name
+        userProfile?.displayName
     }
 
-    override init() {
+    /// Non-nil only once Firebase has verified the account, because `uid` is the half
+    /// Firestore rules enforce and this app is in no position to assert it itself.
+    var currentSyncIdentity: SyncIdentity? {
+        guard let uid = sessionAuthenticator.currentUID,
+              let googleAccountID = userProfile?.id,
+              // The two sessions are stored separately and can name different accounts;
+              // syncing on a mismatched pair would file this account's data under the
+              // other one's ownership.
+              sessionAuthenticator.signedInGoogleAccountID == googleAccountID else {
+            return nil
+        }
+        return SyncIdentity(uid: uid, googleAccountID: googleAccountID)
+    }
+
+    init(sessionAuthenticator: FirebaseSessionAuthenticating = FirebaseSessionAuthenticator()) {
+        self.sessionAuthenticator = sessionAuthenticator
         super.init()
         restorePersistedCredentials()
     }
@@ -82,6 +103,7 @@ final class GoogleDriveTransferService: NSObject, CloudStorageTransferService {
             }
             userProfile = profile
             credentialStore.save(token: token, profile: profile)
+            try await ensureFirebaseSession()
             _ = try await ensureRootFolderExists()
             lastFailureDescription = nil
             AppLog.drive.info("Health check succeeded for user \(profile.id).")
@@ -247,9 +269,12 @@ private extension GoogleDriveTransferService {
         case invalidRedirect
         case tokenExchangeFailed
         case profileFetchFailed
+        case sessionVerificationFailed
 
         var errorDescription: String? {
             switch self {
+            case .sessionVerificationFailed:
+                return "Please relink your Google account to re-enable secure sync."
             case .platformUnsupported:
                 return "Google Drive linking is not supported on this platform."
             case .notAuthorized:
@@ -265,6 +290,9 @@ private extension GoogleDriveTransferService {
     }
 
     func authorizationRequestURL() throws -> URL {
+        let pkce = PKCEChallenge()
+        pendingPKCE = pkce
+
         var components = URLComponents(url: Constants.authorizationEndpoint, resolvingAgainstBaseURL: false)
         components?.queryItems = [
             URLQueryItem(name: "client_id", value: Constants.clientID),
@@ -272,9 +300,12 @@ private extension GoogleDriveTransferService {
             URLQueryItem(name: "response_type", value: "code"),
             URLQueryItem(name: "scope", value: Constants.scopeString),
             URLQueryItem(name: "access_type", value: "offline"),
-            URLQueryItem(name: "prompt", value: "consent")
+            URLQueryItem(name: "prompt", value: "consent"),
+            URLQueryItem(name: "code_challenge", value: pkce.challenge),
+            URLQueryItem(name: "code_challenge_method", value: PKCEChallenge.method)
         ]
         guard let url = components?.url else {
+            pendingPKCE = nil
             throw AuthorizationError.invalidRedirect
         }
         return url
@@ -299,6 +330,46 @@ private extension GoogleDriveTransferService {
     }
 #endif
 
+    /// Makes sure a verified Firebase session backs the Drive credentials.
+    ///
+    /// Usually a no-op, because Firebase persists its own session across launches. It
+    /// earns its place in the two cases where the two sessions diverge: credentials
+    /// restored from the keychain onto a fresh install, and a Firebase session revoked
+    /// server-side. Both leave the app linked to Drive but unable to read back a single
+    /// one of its own documents.
+    ///
+    /// An account linked before the `openid` scope was requested has a refresh token
+    /// that will never yield an ID token, so it has to relink once. That is the whole
+    /// migration cost of moving Firestore behind real authentication.
+    func ensureFirebaseSession() async throws {
+        if sessionAuthenticator.currentUID != nil {
+            guard sessionAuthenticator.signedInGoogleAccountID != userProfile?.id else { return }
+            // Left over from a previous account: signing in below would otherwise be
+            // skipped and every subsequent write attributed to the wrong owner.
+            AppLog.drive.info("Firebase session belongs to another account; re-establishing.")
+            sessionAuthenticator.signOut()
+        }
+
+        // A stored ID token is minutes-fresh at best; the refresh is what produces one
+        // Firebase will still accept.
+        try await refreshToken(force: true)
+
+        guard let token, let idToken = token.idToken else {
+            AppLog.drive.error("No ID token available; account predates the openid scope.")
+            resetCredentials()
+            lastFailureDescription = AuthorizationError.sessionVerificationFailed.localizedDescription
+            throw AuthorizationError.sessionVerificationFailed
+        }
+
+        do {
+            try await sessionAuthenticator.signIn(idToken: idToken, accessToken: token.accessToken)
+        } catch {
+            AppLog.drive.error("Firebase sign-in failed: \(error.localizedDescription)")
+            lastFailureDescription = AuthorizationError.sessionVerificationFailed.localizedDescription
+            throw AuthorizationError.sessionVerificationFailed
+        }
+    }
+
     func completeAuthorization(callbackURL: URL) async throws {
         guard let components = URLComponents(url: callbackURL, resolvingAgainstBaseURL: false),
               let code = components.queryItems?.first(where: { $0.name == "code" })?.value else {
@@ -312,29 +383,40 @@ private extension GoogleDriveTransferService {
         let profile = try await fetchUserProfile(token: token)
         userProfile = profile
         credentialStore.save(token: token, profile: profile)
+
+        // Before the link is reported as successful: an account that reaches Drive but
+        // has no Firebase session can upload attachments and then fail every Firestore
+        // read, which looks like data loss rather than a failed sign-in.
+        try await ensureFirebaseSession()
     }
 }
 
 // MARK: - Token & Profile
 
 private extension GoogleDriveTransferService {
-    func exchangeCodeForToken(code: String) async throws -> OAuthToken {
+    func exchangeCodeForToken(code: String) async throws -> GoogleOAuthToken {
         var request = URLRequest(url: Constants.tokenEndpoint)
         request.httpMethod = "POST"
-        let bodyParams: [String: String] = [
+        var bodyParams: [String: String] = [
             "code": code,
             "client_id": Constants.clientID,
             "redirect_uri": Constants.redirectURI,
             "grant_type": "authorization_code"
         ]
+        // Consumed here and nowhere else: a verifier that outlived its exchange could be
+        // replayed against a second intercepted code.
+        if let verifier = pendingPKCE?.verifier {
+            bodyParams["code_verifier"] = verifier
+        }
+        pendingPKCE = nil
         request.httpBody = bodyParams.percentEncoded()
         request.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
 
         let data = try await performRequest(request)
-        return try JSONDecoder().decode(OAuthToken.self, from: data)
+        return try JSONDecoder().decode(GoogleOAuthToken.self, from: data)
     }
 
-    func fetchUserProfile(token: OAuthToken) async throws -> GoogleUserProfile {
+    func fetchUserProfile(token: GoogleOAuthToken) async throws -> GoogleUserProfile {
         guard let url = URL(string: "https://www.googleapis.com/oauth2/v2/userinfo") else {
             throw AuthorizationError.profileFetchFailed
         }
@@ -384,7 +466,7 @@ private extension GoogleDriveTransferService {
             let data = try await performRequest(request,
                                                 injectAuthorizationHeader: false,
                                                 allowRefresh: false)
-            var refreshed = try JSONDecoder().decode(OAuthToken.self, from: data)
+            var refreshed = try JSONDecoder().decode(GoogleOAuthToken.self, from: data)
             refreshed.refreshToken = refreshToken
             self.token = refreshed
             credentialStore.save(token: refreshed, profile: userProfile)
@@ -655,84 +737,18 @@ private extension GoogleDriveTransferService {
     }
 }
 
-// MARK: - OAuth Token
-
-extension GoogleDriveTransferService {
-    struct OAuthToken: Codable {
-        let accessToken: String
-        let expiresIn: Int
-        var refreshToken: String?
-        let tokenType: String
-        let scope: String?
-        let createdAt: Date
-
-        init(accessToken: String,
-             expiresIn: Int,
-             refreshToken: String?,
-             tokenType: String,
-             scope: String?,
-             createdAt: Date = Date()) {
-            self.accessToken = accessToken
-            self.expiresIn = expiresIn
-            self.refreshToken = refreshToken
-            self.tokenType = tokenType
-            self.scope = scope
-            self.createdAt = createdAt
-        }
-
-        init(from decoder: Decoder) throws {
-            let container = try decoder.container(keyedBy: CodingKeys.self)
-            accessToken = try container.decode(String.self, forKey: .accessToken)
-            expiresIn = try container.decode(Int.self, forKey: .expiresIn)
-            refreshToken = try container.decodeIfPresent(String.self, forKey: .refreshToken)
-            tokenType = try container.decode(String.self, forKey: .tokenType)
-            scope = try container.decodeIfPresent(String.self, forKey: .scope)
-            createdAt = try container.decodeIfPresent(Date.self, forKey: .createdAt) ?? Date()
-        }
-
-        func encode(to encoder: Encoder) throws {
-            var container = encoder.container(keyedBy: CodingKeys.self)
-            try container.encode(accessToken, forKey: .accessToken)
-            try container.encode(expiresIn, forKey: .expiresIn)
-            try container.encodeIfPresent(refreshToken, forKey: .refreshToken)
-            try container.encode(tokenType, forKey: .tokenType)
-            try container.encodeIfPresent(scope, forKey: .scope)
-            try container.encode(createdAt, forKey: .createdAt)
-        }
-
-        enum CodingKeys: String, CodingKey {
-            case accessToken = "access_token"
-            case expiresIn = "expires_in"
-            case refreshToken = "refresh_token"
-            case tokenType = "token_type"
-            case scope
-            case createdAt
-        }
-
-        var expirationDate: Date {
-            createdAt.addingTimeInterval(TimeInterval(expiresIn))
-        }
-
-        var isExpired: Bool { Date() >= expirationDate }
-    }
-
-    struct GoogleUserProfile: Codable {
-        let id: String
-        let name: String?
-        let given_name: String?
-        let family_name: String?
-        let picture: String?
-    }
-}
-
 // MARK: - Credential Helpers
 
 private extension GoogleDriveTransferService {
     func resetCredentials() {
         token = nil
         userProfile = nil
+        pendingPKCE = nil
         folderCache.removeAll()
         credentialStore.deleteCredentials()
+        // Leaving the Firebase session behind would keep this device authenticated to
+        // another account's documents after the Drive link is gone.
+        sessionAuthenticator.signOut()
         consecutiveRefreshFailures = 0
         AppLog.drive.debug("Cleared Drive credentials and cache.")
     }
@@ -758,182 +774,6 @@ private extension GoogleDriveTransferService {
         }
 
         return false
-    }
-}
-
-// MARK: - Helpers
-
-private struct DriveCreateFolderPayload: Encodable {
-    let name: String
-    let mimeType = GoogleDriveTransferService.Constants.folderMimeType
-    let parents: [String]
-}
-
-private struct DriveFileMetadata: Encodable {
-    let name: String
-    let parents: [String]
-}
-
-/// One HTTP round trip's outcome, kept together so the 401 retry can inspect a response
-/// before deciding whether to turn it into an error.
-private struct DriveResponse {
-    let data: Data
-    let statusCode: Int
-    /// The request that produced it, for logging.
-    let description: String
-}
-
-/// Splits a recorded upload path — `<base>/<yyyy>/<MM>/<fileName>` — back into its parts.
-private struct DrivePathComponents {
-    let baseFolderName: String
-    let yearFolderName: String
-    let monthFolderName: String
-    let fileName: String
-
-    init?(path: String) {
-        let components = path.split(separator: "/").map(String.init)
-        // Exactly four: the previous `>= 4` accepted longer paths but still read the base,
-        // year, and month from the first three components, so a nested path resolved to
-        // the wrong folder while claiming success.
-        guard components.count == 4 else { return nil }
-        baseFolderName = components[0]
-        yearFolderName = components[1]
-        monthFolderName = components[2]
-        fileName = components[3]
-    }
-}
-
-private struct DriveFileListResponse: Decodable {
-    let files: [DriveFileResponse]?
-}
-
-private struct DriveFileResponse: Decodable {
-    let id: String
-}
-
-private struct DriveFileUpdatePayload: Encodable {
-    let name: String?
-    let addParents: String?
-    let removeParents: String?
-}
-
-private struct DriveAPIErrorResponse: Decodable {
-    struct DriveErrorDetail: Decodable {
-        let code: Int
-        let message: String
-    }
-
-    let error: DriveErrorDetail
-}
-
-enum DriveServiceError: LocalizedError {
-    case invalidResponse
-    case httpError(statusCode: Int)
-    case apiError(code: Int, message: String)
-
-    var errorDescription: String? {
-        switch self {
-        case .invalidResponse:
-            return "Received an invalid response from Google Drive."
-        case .httpError(let statusCode):
-            return "Google Drive request failed with status code \(statusCode)."
-        case .apiError(_, let message):
-            return message
-        }
-    }
-}
-
-private struct GoogleDriveStoredCredentials: Codable {
-    let token: GoogleDriveTransferService.OAuthToken
-    let profile: GoogleDriveTransferService.GoogleUserProfile?
-}
-
-private struct GoogleDriveCredentialStore {
-    private let service = "com.invoicee.googleDrive.auth"
-    private let account = "oauthCredentials"
-
-    func save(token: GoogleDriveTransferService.OAuthToken, profile: GoogleDriveTransferService.GoogleUserProfile?) {
-        let credentials = GoogleDriveStoredCredentials(token: token, profile: profile)
-        guard let data = try? JSONEncoder().encode(credentials) else { return }
-        var query = baseQuery()
-        SecItemDelete(query as CFDictionary)
-        query[kSecValueData as String] = data
-        query[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlock
-        let status = SecItemAdd(query as CFDictionary, nil)
-        if status != errSecSuccess {
-            AppLog.drive.error("Failed to save Google Drive credentials: OSStatus \(status)")
-        }
-    }
-
-    func loadCredentials() -> GoogleDriveStoredCredentials? {
-        var query = baseQuery()
-        query[kSecReturnData as String] = true
-        // Matching all, not one: a bug in an earlier version could leave more than one
-        // item under this service/account pair, and the newest is the one to trust.
-        query[kSecMatchLimit as String] = kSecMatchLimitAll
-
-        var item: CFTypeRef?
-        guard SecItemCopyMatching(query as CFDictionary, &item) == errSecSuccess else { return nil }
-
-        let decoder = JSONDecoder()
-        let decoded = Self.credentialData(from: item)
-            .compactMap { try? decoder.decode(GoogleDriveStoredCredentials.self, from: $0) }
-
-        guard let mostRecent = decoded.max(by: { $0.token.createdAt < $1.token.createdAt }) else {
-            return nil
-        }
-
-        // Collapse duplicates back down to the one we just chose.
-        if decoded.count > 1 {
-            save(token: mostRecent.token, profile: mostRecent.profile)
-        }
-        return mostRecent
-    }
-
-    /// `kSecMatchLimitAll` returns either a lone `Data` or an array of items, so both
-    /// shapes have to be unwrapped.
-    private static func credentialData(from item: CFTypeRef?) -> [Data] {
-        if let data = item as? Data { return [data] }
-        guard let values = item as? [Any] else { return [] }
-        return values.compactMap { value in
-            if let data = value as? Data { return data }
-            return (value as? [String: Any])?[kSecValueData as String] as? Data
-        }
-    }
-
-    func deleteCredentials() {
-        let status = SecItemDelete(baseQuery() as CFDictionary)
-        if status != errSecSuccess, status != errSecItemNotFound {
-            AppLog.drive.error("Failed to delete Google Drive credentials: OSStatus \(status)")
-        }
-    }
-
-    private func baseQuery() -> [String: Any] {
-        [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
-            kSecAttrAccount as String: account
-        ]
-    }
-}
-
-private extension Data {
-    mutating func appendString(_ string: String) {
-        if let data = string.data(using: .utf8) {
-            append(data)
-        }
-    }
-}
-
-private extension Dictionary where Key == String, Value == String {
-    func percentEncoded() -> Data? {
-        map { key, value in
-            let escapedKey = key.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? key
-            let escapedValue = value.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? value
-            return "\(escapedKey)=\(escapedValue)"
-        }
-        .joined(separator: "&")
-        .data(using: .utf8)
     }
 }
 

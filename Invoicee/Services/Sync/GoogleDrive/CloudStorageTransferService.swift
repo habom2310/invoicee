@@ -4,6 +4,9 @@ import Foundation
 protocol CloudStorageTransferService {
     var currentUserID: String? { get }
     var currentAccountName: String? { get }
+    /// The identity Firestore writes are attributed to, available only once the account
+    /// has been verified against Firebase. `nil` means nothing may be synced yet.
+    var currentSyncIdentity: SyncIdentity? { get }
     /// The most recent failure the service recorded, if any.
     ///
     /// Part of the protocol because the connector needs it to explain a failed link.

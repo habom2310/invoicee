@@ -47,14 +47,14 @@ final class InvoiceRemoteSynchronizer: InvoiceSyncHost {
         guard !isSyncing else { return false }
 
         guard connector.authorizationState() == .linked,
-              let userID = connector.currentAccountID else {
+              let identity = connector.currentSyncIdentity else {
             return false
         }
 
         isSyncing = true
         defer { isSyncing = false }
 
-        let remoteInvoices = try await firestoreUploader.fetchInvoices(for: userID)
+        let remoteInvoices = try await firestoreUploader.fetchInvoices(for: identity)
         guard !remoteInvoices.isEmpty else { return false }
 
         var merged = Dictionary(uniqueKeysWithValues: archive.invoices.map { ($0.id, $0) })

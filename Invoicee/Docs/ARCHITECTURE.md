@@ -50,7 +50,7 @@ Invoicee/
 
   Services/
     OCR/
-      InvoiceOCR.swift              # nonisolated Vision pass + document scanner view
+      InvoiceOCR.swift              # nonisolated Vision pass + field parsing
     Revenue/
       RevenueSummaryProvider.swift  # Cached monthly revenue totals
     Firebase/
@@ -62,7 +62,9 @@ Invoicee/
       GoogleDrive/
         GoogleDriveConnector.swift  # Link lifecycle, auto-sync scheduling
         GoogleDriveSyncCoordinator.swift # Per-invoice upload orchestration
-        GoogleDriveTransferService.swift # OAuth + Drive REST
+        GoogleDriveTransferService.swift # OAuth flow + Drive REST
+        GoogleDriveCredentials.swift # Token/profile models + keychain store
+        DriveWireModels.swift       # Drive request/response DTOs, DriveServiceError
         CloudStorageTransferService.swift # The protocol the above satisfies
         DriveUploadMetadata.swift   # Folder/file naming and parsing
         InvoiceDriveExporter.swift  # Attachment → temp file, resized
@@ -81,6 +83,8 @@ Invoicee/
       Components/
         CapturedInvoiceRow.swift
         InvoiceFormControls.swift
+        DocumentScannerView.swift   # VisionKit scanner, kept out of Services/
+        MediaPickers.swift          # Photo library + PDF document pickers
       Detail/
         InvoiceDetailView.swift
     Expense/
@@ -98,7 +102,8 @@ Invoicee/
   Utilities/
     CSV/CSVExporting.swift
     Extensions/                     # Binding+MoneyText, Calendar+ReportingPeriods,
-                                    # Color, Date, Decimal, Error+UserFacing, String
+                                    # Color, Date, Decimal, Error+UserFacing,
+                                    # NSRegularExpression+Matching, String
     Formatting/                     # NumberFormatter+Currency, ReportingDateFormatter
     Imaging/PDFPageRenderer.swift
     Logging/AppLog.swift
@@ -133,8 +138,8 @@ models and wrong for anything expensive, so the following are deliberately `noni
 - `PDFPageRenderer` – page rasterisation.
 - `InvoiceDriveExporter` – image resizing and temp-file writes.
 - `CSVExporting`, `ReportingDateFormatter`, `NumberFormatter+Currency`,
-  `Decimal`/`String`/`Error`/`Calendar` extensions, `GSTRate`, `GSTValidator`,
-  `DriveUploadMetadata` – pure helpers, callable from any isolation.
+  `Decimal`/`String`/`Error`/`Calendar`/`NSRegularExpression` extensions, `GSTRate`,
+  `GSTValidator`, `DriveUploadMetadata` – pure helpers, callable from any isolation.
 
 `InvoiceSyncTracker` and `LocalInvoiceStore`'s file writer are actors. The writer tags
 each snapshot with a sequence number so a slow encode cannot overwrite a newer one.
@@ -149,6 +154,21 @@ update and each of those aggregations walks the whole archive.
 `ReportingPeriodStore` and `ExpenseMetricStore` let the tabs share a selection. The
 subscriptions are delivered on `RunLoop.main` so a picker change never publishes back into
 the middle of a view update.
+
+`ReportingPeriodOptions` is the only place a year list is derived. Expense, Revenue, and
+Profit each used to build their own, and the three had drifted: one excluded future years,
+one added the current year, one added neither. They now differ only in how they keep a
+`Picker` from rendering blank when its selection holds no data — a `Picker` whose selection
+is absent from its options shows nothing:
+
+- Invoice and Expense **clamp the selection** onto the options (`clamped(month:year:)`).
+- Revenue and Profit **widen the options** to include the selection
+  (`availableYears(including:)`), because their selection is free to roam.
+
+Each view model rebuilds its options when its data changes, not inside `availableYears` —
+the year menu reads that property from `body` on every pass. Month lists are unchanged:
+Invoice and Expense restrict them via `availableMonths(for:)`, while Revenue and Profit
+still offer all twelve.
 
 ## Known issue: GST is treated as exclusive
 

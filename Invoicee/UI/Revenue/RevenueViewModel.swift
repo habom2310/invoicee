@@ -68,6 +68,9 @@ final class RevenueViewModel: ObservableObject {
     private let summaryProvider: RevenueSummaryProviding?
     private let calendar: Calendar
     private var cancellables = Set<AnyCancellable>()
+    /// Rebuilt in `applyEntries` rather than derived in `availableYears`, because the
+    /// year menu reads that property from `body` on every pass.
+    private var periodOptions: ReportingPeriodOptions
 
     init(store: RevenueStoring,
          driveConnector: GoogleDriveConnector,
@@ -77,6 +80,7 @@ final class RevenueViewModel: ObservableObject {
         self.driveConnector = driveConnector
         self.summaryProvider = summaryProvider
         self.calendar = calendar
+        periodOptions = ReportingPeriodOptions(dates: [], calendar: calendar)
 
         let today = calendar.startOfDay(for: Date())
         selectedMonth = calendar.component(.month, from: today)
@@ -96,7 +100,7 @@ final class RevenueViewModel: ObservableObject {
 
     func refresh() async {
         guard !isLoading else { return }
-        guard let userID = driveConnector.currentAccountID else {
+        guard let identity = driveConnector.currentSyncIdentity else {
             applyEntries([])
             errorMessage = Self.linkPromptMessage
             return
@@ -107,7 +111,7 @@ final class RevenueViewModel: ObservableObject {
         defer { isLoading = false }
 
         do {
-            applyEntries(try await store.fetchEntries(for: userID))
+            applyEntries(try await store.fetchEntries(for: identity))
         } catch {
             errorMessage = error.userFacingDescription
             applyEntries([])
@@ -161,8 +165,7 @@ final class RevenueViewModel: ObservableObject {
     }
 
     var availableYears: [Int] {
-        let years = Set(entries.map { calendar.component(.year, from: $0.date) }).union([selectedYear])
-        return years.sorted()
+        periodOptions.availableYears(including: selectedYear)
     }
 
     // MARK: - Form
@@ -196,7 +199,7 @@ final class RevenueViewModel: ObservableObject {
 
     func saveCurrentForm() async {
         guard !isSavingForm else { return }
-        guard let userID = driveConnector.currentAccountID else {
+        guard let identity = driveConnector.currentSyncIdentity else {
             formErrorMessage = "Link Google Drive to record revenue."
             return
         }
@@ -215,7 +218,7 @@ final class RevenueViewModel: ObservableObject {
             let saved = try await store.save(date: formDate,
                                              streams: sanitizedStreams,
                                              documentID: entry(for: formDate)?.documentID,
-                                             userID: userID)
+                                             identity: identity)
             upsertEntry(saved)
             // Expense/profit screens read revenue through the cached provider.
             summaryProvider?.invalidateCache()
@@ -275,6 +278,7 @@ final class RevenueViewModel: ObservableObject {
                                    streams: $0.streams) }
             .sorted { $0.date > $1.date }
         knownStreams = Self.distinctStreams(from: entries)
+        periodOptions = ReportingPeriodOptions(dates: entries.map(\.date), calendar: calendar)
         recomputeSelection()
     }
 

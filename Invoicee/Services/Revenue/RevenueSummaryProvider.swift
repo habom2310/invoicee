@@ -16,12 +16,12 @@ final class RevenueSummaryProvider: RevenueSummaryProviding {
     private static let cacheLifetime: TimeInterval = 30
 
     private struct Cache {
-        let userID: String
+        let identity: SyncIdentity
         let fetchedAt: Date
         let totals: [String: Decimal]
 
-        func isValid(for userID: String, now: Date, lifetime: TimeInterval) -> Bool {
-            self.userID == userID && now.timeIntervalSince(fetchedAt) < lifetime
+        func isValid(for identity: SyncIdentity, now: Date, lifetime: TimeInterval) -> Bool {
+            self.identity == identity && now.timeIntervalSince(fetchedAt) < lifetime
         }
     }
 
@@ -29,7 +29,7 @@ final class RevenueSummaryProvider: RevenueSummaryProviding {
     private let driveConnector: GoogleDriveConnector
     private let calendar: Calendar
     private var cache: Cache?
-    private var inFlight: (userID: String, task: Task<[String: Decimal]?, Never>)?
+    private var inFlight: (identity: SyncIdentity, task: Task<[String: Decimal]?, Never>)?
 
     init(store: RevenueStoring,
          driveConnector: GoogleDriveConnector,
@@ -40,11 +40,11 @@ final class RevenueSummaryProvider: RevenueSummaryProviding {
     }
 
     func totalRevenue(forMonth month: Int, year: Int) async -> Decimal? {
-        guard let userID = driveConnector.currentAccountID else {
+        guard let identity = driveConnector.currentSyncIdentity else {
             invalidateCache()
             return nil
         }
-        return await monthlyTotals(for: userID)?[Self.monthKey(month: month, year: year)]
+        return await monthlyTotals(for: identity)?[Self.monthKey(month: month, year: year)]
     }
 
     func invalidateCache() {
@@ -59,12 +59,12 @@ final class RevenueSummaryProvider: RevenueSummaryProviding {
         "\(year)-\(month)"
     }
 
-    private func monthlyTotals(for userID: String) async -> [String: Decimal]? {
-        if let cache, cache.isValid(for: userID, now: Date(), lifetime: Self.cacheLifetime) {
+    private func monthlyTotals(for identity: SyncIdentity) async -> [String: Decimal]? {
+        if let cache, cache.isValid(for: identity, now: Date(), lifetime: Self.cacheLifetime) {
             return cache.totals
         }
 
-        if let inFlight, inFlight.userID == userID {
+        if let inFlight, inFlight.identity == identity {
             return await inFlight.task.value
         }
 
@@ -74,14 +74,14 @@ final class RevenueSummaryProvider: RevenueSummaryProviding {
         let store = store
         let calendar = calendar
         let task = Task<[String: Decimal]?, Never> {
-            guard let entries = try? await store.fetchEntries(for: userID) else { return nil }
+            guard let entries = try? await store.fetchEntries(for: identity) else { return nil }
             return entries.reduce(into: [String: Decimal]()) { result, entry in
                 let components = calendar.dateComponents([.year, .month], from: entry.date)
                 guard let year = components.year, let month = components.month else { return }
                 result[Self.monthKey(month: month, year: year), default: .zero] += entry.total
             }
         }
-        inFlight = (userID, task)
+        inFlight = (identity, task)
 
         let totals = await task.value
         // Only clear and cache if this task is still the current one; `invalidateCache`
@@ -89,7 +89,7 @@ final class RevenueSummaryProvider: RevenueSummaryProviding {
         guard inFlight?.task == task else { return totals }
         inFlight = nil
         if let totals {
-            cache = Cache(userID: userID, fetchedAt: Date(), totals: totals)
+            cache = Cache(identity: identity, fetchedAt: Date(), totals: totals)
         }
         return totals
     }

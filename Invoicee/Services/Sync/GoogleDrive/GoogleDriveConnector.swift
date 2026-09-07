@@ -46,8 +46,14 @@ final class GoogleDriveConnector: ObservableObject, InvoiceAutoSyncScheduling {
         }
     }
 
-    var currentAccountID: String? {
-        transferService.currentUserID
+    /// What the Firestore-backed screens key their reads and writes on.
+    ///
+    /// Deliberately the only account identifier this connector exposes: the Google
+    /// account ID it replaced is asserted by this app rather than verified by Firebase,
+    /// so a caller reaching for it to decide what data to show would be trusting the
+    /// wrong half of `SyncIdentity`.
+    var currentSyncIdentity: SyncIdentity? {
+        transferService.currentSyncIdentity
     }
 
     let transferService: CloudStorageTransferService

@@ -35,6 +35,18 @@ struct ReportingPeriodOptions {
         return years.sorted()
     }
 
+    /// `availableYears` with `year` guaranteed present.
+    ///
+    /// For the screens that widen the list to keep their current selection selectable
+    /// rather than clamping the selection onto the list. A SwiftUI `Picker` whose
+    /// selection is absent from its options renders blank, so a screen that lets the
+    /// selection roam has to do one or the other.
+    func availableYears(including year: Int) -> [Int] {
+        var years = Set(availableYears)
+        years.insert(year)
+        return years.sorted()
+    }
+
     /// Months selectable for `year`: every elapsed month, plus any month holding data.
     func availableMonths(for year: Int) -> [Int] {
         var months = monthsByYear[year] ?? []

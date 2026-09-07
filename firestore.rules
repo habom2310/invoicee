@@ -1,0 +1,96 @@
+rules_version = '2';
+
+// Invoicee Firestore security rules.
+//
+// Deploy these together with the app version that signs into Firebase, and keep them in
+// sync with the queries in InvoiceFirestoreUploader and RevenueFirestoreStore. Firestore
+// rejects any query it cannot prove returns only permitted documents, so every `where`
+// clause in the app needs a matching clause here — and a clause here that the query
+// cannot express turns into a blanket permission-denied.
+//
+// That constraint is why `list` and the single-document operations are spelled out
+// separately below. A query is checked against the query's own constraints, so a
+// document field can be named directly. Everything else is checked against a real
+// document, where naming a field that predates this schema is an evaluation error
+// rather than a `false` — hence `get(...)` with a default.
+//
+// Deploy with:  firebase deploy --only firestore:rules
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    // The Google account behind the Firebase session. Firebase populates this only after
+    // verifying Google's ID token, so unlike anything the client sends it can be trusted.
+    // Guarded, because indexing a provider the user did not sign in with is an error.
+    function hasGoogleIdentity() {
+      return signedIn() && 'google.com' in request.auth.token.firebase.identities;
+    }
+
+    function googleSub() {
+      return request.auth.token.firebase.identities['google.com'][0];
+    }
+
+    // --- Ownership, as a query sees it -------------------------------------------
+
+    function ownsMatching() {
+      return signedIn() && resource.data.ownerUID == request.auth.uid;
+    }
+
+    function ownsLegacyInvoiceMatching() {
+      return hasGoogleIdentity() && resource.data.driveAccountID == googleSub();
+    }
+
+    function ownsLegacyRevenueMatching() {
+      return hasGoogleIdentity() && resource.data.userID == googleSub();
+    }
+
+    // --- Ownership, as a stored document sees it ---------------------------------
+
+    function ownsDocument() {
+      return signedIn() && resource.data.get('ownerUID', '') == request.auth.uid;
+    }
+
+    function ownsLegacyInvoiceDocument() {
+      return hasGoogleIdentity() && resource.data.get('driveAccountID', '') == googleSub();
+    }
+
+    function ownsLegacyRevenueDocument() {
+      return hasGoogleIdentity() && resource.data.get('userID', '') == googleSub();
+    }
+
+    // Every write must stamp the caller's own uid. This is the clause that stops one
+    // account planting a document another account would later read as its own, and it
+    // also prevents handing an existing document to someone else.
+    function claimsSelf() {
+      return signedIn() && request.resource.data.ownerUID == request.auth.uid;
+    }
+
+    // The legacy clauses cover documents written before Firebase Auth existed, which
+    // carry no `ownerUID`. Every write from the current app stamps one, so that set only
+    // shrinks; once it is empty both clauses can go, along with `hasGoogleIdentity`.
+    match /invoices/{invoiceID} {
+      allow list:   if ownsMatching() || ownsLegacyInvoiceMatching();
+      allow get:    if ownsDocument() || ownsLegacyInvoiceDocument();
+      allow create: if claimsSelf();
+      allow update: if claimsSelf() && (ownsDocument() || ownsLegacyInvoiceDocument());
+      allow delete: if ownsDocument() || ownsLegacyInvoiceDocument();
+    }
+
+    match /revenue/{entryID} {
+      allow list:   if ownsMatching() || ownsLegacyRevenueMatching();
+      allow get:    if ownsDocument() || ownsLegacyRevenueDocument();
+      allow create: if claimsSelf();
+      allow update: if claimsSelf() && (ownsDocument() || ownsLegacyRevenueDocument());
+      allow delete: if ownsDocument() || ownsLegacyRevenueDocument();
+    }
+
+    // Anything not named above is closed, including collections added later that nobody
+    // remembered to write rules for.
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}

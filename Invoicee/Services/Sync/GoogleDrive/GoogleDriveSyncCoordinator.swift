@@ -58,8 +58,8 @@ final class GoogleDriveSyncCoordinator: GoogleDriveSyncCoordinating {
         guard !pending.isEmpty else { return SyncOutcome(invoices: []) }
         AppLog.driveSync.debug("Invoices needing sync: \(pending.count)")
 
-        guard let userID = transferService.currentUserID else {
-            AppLog.driveSync.error("Cannot sync invoices: missing Google Drive user ID.")
+        guard let identity = transferService.currentSyncIdentity else {
+            AppLog.driveSync.error("Cannot sync invoices: no verified sync identity.")
             throw SyncError.missingUserIdentity
         }
 
@@ -76,7 +76,7 @@ final class GoogleDriveSyncCoordinator: GoogleDriveSyncCoordinating {
             try await firestoreUploader.upload(invoice: invoice,
                                                imageFileName: attachment.imageFileName,
                                                pdfFileName: attachment.pdfFileName,
-                                               userID: userID)
+                                               identity: identity)
             await tracker.markSynced(invoice: invoice,
                                      imagePath: attachment.imagePath,
                                      pdfPath: attachment.pdfPath)

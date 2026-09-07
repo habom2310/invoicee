@@ -2,10 +2,6 @@ import Foundation
 #if canImport(Vision)
 import Vision
 #endif
-#if canImport(VisionKit)
-internal import SwiftUI
-import VisionKit
-#endif
 #if canImport(UIKit)
 import UIKit
 #endif
@@ -324,89 +320,6 @@ private nonisolated struct RecognizedEntry: Identifiable {
         let lower = text.lowercased()
         let summaryLabels = ["total", "subtotal", "tax", "gst", "balance", "amount due"]
         return !summaryLabels.contains { lower.contains($0) }
-    }
-}
-#endif
-
-/// `nonisolated` so the OCR pass, which runs off the main actor, can use these.
-nonisolated extension NSRegularExpression {
-    /// A regex from a literal pattern known at compile time.
-    ///
-    /// Traps on a malformed pattern, which can only be a programming error: these are
-    /// all string literals in this file. Previously some call sites built their regex
-    /// with `try?` inside the matching loop, silently matching nothing on a typo and
-    /// recompiling the pattern for every line of every scan.
-    static func compiled(_ pattern: String) -> NSRegularExpression {
-        do {
-            return try NSRegularExpression(pattern: pattern)
-        } catch {
-            preconditionFailure("Invalid regular expression literal '\(pattern)': \(error)")
-        }
-    }
-
-    private func fullRange(of string: String) -> NSRange {
-        NSRange(location: 0, length: string.utf16.count)
-    }
-
-    func matches(_ string: String) -> Bool {
-        firstMatch(in: string, options: [], range: fullRange(of: string)) != nil
-    }
-
-    /// The text of the first match, or `nil` when the pattern does not match.
-    func firstMatchText(in string: String) -> String? {
-        guard let match = firstMatch(in: string, options: [], range: fullRange(of: string)),
-              let range = Range(match.range, in: string) else { return nil }
-        return String(string[range])
-    }
-
-    /// The captured groups of the first match, excluding the whole-match group.
-    func firstMatchGroups(in string: String) -> [String]? {
-        guard let match = firstMatch(in: string, options: [], range: fullRange(of: string)) else { return nil }
-        return (1..<match.numberOfRanges).compactMap { index in
-            Range(match.range(at: index), in: string).map { String(string[$0]) }
-        }
-    }
-}
-
-#if canImport(VisionKit) && canImport(SwiftUI)
-/// Presents the system document scanner and reports the first scanned page.
-struct DocumentScannerView: UIViewControllerRepresentable {
-    var completion: (Result<UIImage, Error>) -> Void
-
-    func makeCoordinator() -> Coordinator {
-        Coordinator(completion: completion)
-    }
-
-    func makeUIViewController(context: Context) -> VNDocumentCameraViewController {
-        let controller = VNDocumentCameraViewController()
-        controller.delegate = context.coordinator
-        return controller
-    }
-
-    func updateUIViewController(_ uiViewController: VNDocumentCameraViewController, context: Context) {}
-
-    final class Coordinator: NSObject, VNDocumentCameraViewControllerDelegate {
-        private let completion: (Result<UIImage, Error>) -> Void
-
-        init(completion: @escaping (Result<UIImage, Error>) -> Void) {
-            self.completion = completion
-        }
-
-        func documentCameraViewControllerDidCancel(_ controller: VNDocumentCameraViewController) {
-            completion(.failure(InvoiceOCRError.scanCancelled))
-        }
-
-        func documentCameraViewController(_ controller: VNDocumentCameraViewController, didFailWithError error: Error) {
-            completion(.failure(error))
-        }
-
-        func documentCameraViewController(_ controller: VNDocumentCameraViewController, didFinishWith scan: VNDocumentCameraScan) {
-            guard scan.pageCount > 0 else {
-                completion(.failure(InvoiceOCRError.invalidImage))
-                return
-            }
-            completion(.success(scan.imageOfPage(at: 0)))
-        }
     }
 }
 #endif
