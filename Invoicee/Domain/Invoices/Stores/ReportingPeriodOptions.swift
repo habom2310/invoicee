@@ -1,9 +1,10 @@
 import Foundation
 
-/// Derives the month/year choices offered by the reporting pickers.
+/// Derives the month/year choices the invoice list's period picker offers.
 ///
-/// Shared by the invoice list and the expense analytics so both screens offer —
-/// and clamp to — exactly the same set of periods.
+/// The reporting tabs used to share this; they now navigate with
+/// `ReportingPeriodSelection` instead, which is free to land on a period holding no
+/// data. The invoice list still picks from a fixed list, so it still clamps.
 struct ReportingPeriodOptions {
     private let calendar: Calendar
     private let invoiceYears: Set<Int>
@@ -32,18 +33,6 @@ struct ReportingPeriodOptions {
     var availableYears: [Int] {
         var years = invoiceYears.filter { $0 <= currentYear }
         years.insert(currentYear)
-        return years.sorted()
-    }
-
-    /// `availableYears` with `year` guaranteed present.
-    ///
-    /// For the screens that widen the list to keep their current selection selectable
-    /// rather than clamping the selection onto the list. A SwiftUI `Picker` whose
-    /// selection is absent from its options renders blank, so a screen that lets the
-    /// selection roam has to do one or the other.
-    func availableYears(including year: Int) -> [Int] {
-        var years = Set(availableYears)
-        years.insert(year)
         return years.sorted()
     }
 

@@ -5,7 +5,7 @@ struct InvoiceTabView: View {
     @EnvironmentObject private var categoryStore: InvoiceCategoryStore
     @EnvironmentObject private var archive: InvoiceArchive
     @EnvironmentObject private var driveConnector: GoogleDriveConnector
-    @EnvironmentObject private var periodStore: ReportingPeriodStore
+    @EnvironmentObject private var monthStore: InvoiceMonthStore
     @EnvironmentObject private var appEnvironment: AppEnvironment
 
     @StateObject private var export = CSVExportController()
@@ -70,7 +70,7 @@ struct InvoiceTabView: View {
         .sheet(isPresented: $isShowingMonthPicker) {
             MonthYearPickerSheet(month: monthBinding,
                                  year: yearBinding(options),
-                                 months: options.availableMonths(for: periodStore.selectedYear),
+                                 months: options.availableMonths(for: monthStore.selectedYear),
                                  years: options.availableYears)
         }
         .csvExporter(export)
@@ -298,14 +298,14 @@ private extension InvoiceTabView {
     }
 
     var selectedPeriodLabel: String {
-        "\(ReportingDateFormatter.shortName(for: periodStore.selectedMonth))-\(periodStore.selectedYear)"
+        "\(ReportingDateFormatter.shortName(for: monthStore.selectedMonth))-\(monthStore.selectedYear)"
     }
 
     /// Applies search text, category, and period filtering to the archive.
     var filteredInvoices: [CapturedInvoice] {
         let calendar = Calendar.current
-        guard let range = calendar.reportingMonth(month: periodStore.selectedMonth,
-                                                  year: periodStore.selectedYear) else {
+        guard let range = calendar.reportingMonth(month: monthStore.selectedMonth,
+                                                  year: monthStore.selectedYear) else {
             return []
         }
         let search = searchText.trimmed
@@ -329,22 +329,22 @@ private extension InvoiceTabView {
     }
 
     var monthBinding: Binding<Int> {
-        Binding(get: { periodStore.selectedMonth },
-                set: { periodStore.set(month: $0, year: periodStore.selectedYear) })
+        Binding(get: { monthStore.selectedMonth },
+                set: { monthStore.set(month: $0, year: monthStore.selectedYear) })
     }
 
     /// Changing the year may leave the month unselectable, so clamp as part of the set.
     func yearBinding(_ options: ReportingPeriodOptions) -> Binding<Int> {
-        Binding(get: { periodStore.selectedYear },
+        Binding(get: { monthStore.selectedYear },
                 set: { year in
-                    let clamped = options.clamped(month: periodStore.selectedMonth, year: year)
-                    periodStore.set(month: clamped.month, year: clamped.year)
+                    let clamped = options.clamped(month: monthStore.selectedMonth, year: year)
+                    monthStore.set(month: clamped.month, year: clamped.year)
                 })
     }
 
     func clampPeriodSelection(_ options: ReportingPeriodOptions) {
-        let clamped = options.clamped(month: periodStore.selectedMonth, year: periodStore.selectedYear)
-        periodStore.set(month: clamped.month, year: clamped.year)
+        let clamped = options.clamped(month: monthStore.selectedMonth, year: monthStore.selectedYear)
+        monthStore.set(month: clamped.month, year: clamped.year)
     }
 }
 

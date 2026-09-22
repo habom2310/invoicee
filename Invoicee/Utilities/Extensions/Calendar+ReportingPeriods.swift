@@ -7,13 +7,20 @@ nonisolated struct ReportingDateRange: Equatable {
     /// Start of the last day in the range.
     let end: Date
 
-    /// Localised "start – end" description.
+    /// Localised "start – end" description, collapsed to one date for a single day.
     var description: String {
-        "\(ReportingDateFormatter.mediumDate(start)) – \(ReportingDateFormatter.mediumDate(end))"
+        guard start != end else { return ReportingDateFormatter.mediumDate(start) }
+        return "\(ReportingDateFormatter.mediumDate(start)) – \(ReportingDateFormatter.mediumDate(end))"
     }
 }
 
 nonisolated extension Calendar {
+    /// The single day containing `date`.
+    func reportingDay(containing date: Date) -> ReportingDateRange {
+        let day = startOfDay(for: date)
+        return ReportingDateRange(start: day, end: day)
+    }
+
     /// The seven day range containing `date`, honouring the calendar's first weekday.
     func reportingWeek(containing date: Date) -> ReportingDateRange? {
         guard let interval = dateInterval(of: .weekOfYear, for: date) else { return nil }
@@ -32,6 +39,13 @@ nonisolated extension Calendar {
         return ReportingDateRange(start: startOfDay(for: start), end: startOfDay(for: end))
     }
 
+    /// The calendar month containing `date`.
+    func reportingMonth(containing date: Date) -> ReportingDateRange? {
+        let components = dateComponents([.year, .month], from: date)
+        guard let year = components.year, let month = components.month else { return nil }
+        return reportingMonth(month: month, year: year)
+    }
+
     /// The full calendar year, or `nil` when `year` is not representable.
     func reportingYear(_ year: Int) -> ReportingDateRange? {
         guard let start = date(from: DateComponents(year: year, month: 1, day: 1)),
@@ -39,6 +53,11 @@ nonisolated extension Calendar {
             return nil
         }
         return ReportingDateRange(start: startOfDay(for: start), end: startOfDay(for: end))
+    }
+
+    /// The calendar year containing `date`.
+    func reportingYear(containing date: Date) -> ReportingDateRange? {
+        reportingYear(component(.year, from: date))
     }
 
     /// `true` when `date` falls inside `range`, comparing whole days.

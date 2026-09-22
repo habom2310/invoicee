@@ -50,30 +50,3 @@ struct MonthYearPickerSheet: View {
         .presentationDetents([.height(320), .medium])
     }
 }
-
-/// A labelled button that opens a month/year picker.
-struct MonthPickerButton: View {
-    let title: String
-    let action: () -> Void
-
-    var body: some View {
-        Button(action: action) {
-            HStack(spacing: 8) {
-                Image(systemName: "calendar")
-                Text(title)
-                    .font(.callout)
-                    .foregroundStyle(.primary)
-                Spacer()
-                Image(systemName: "chevron.down")
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
-            }
-            .padding(.vertical, 8)
-            .padding(.horizontal, 12)
-            .frame(maxWidth: .infinity)
-            .background(Color.secondary.opacity(0.1))
-            .clipShape(RoundedRectangle(cornerRadius: 10))
-        }
-        .buttonStyle(.plain)
-    }
-}

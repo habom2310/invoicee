@@ -43,29 +43,12 @@ final class ProfitAnalyticsViewModel: ObservableObject {
         var id: Int { month }
     }
 
-    @Published var selectedPeriod: ReportingPeriod = .week {
+    /// The period on show, shared with the revenue and expense tabs.
+    @Published var selection: ReportingPeriodSelection {
         didSet {
-            guard selectedPeriod != oldValue else { return }
+            guard selection != oldValue else { return }
             recomputeMetrics()
-        }
-    }
-
-    @Published var selectedMonth: Int {
-        didSet {
-            let clamped = min(max(selectedMonth, 1), 12)
-            guard clamped == selectedMonth else {
-                selectedMonth = clamped
-                return
-            }
-            guard selectedMonth != oldValue else { return }
-            recomputeMetrics()
-        }
-    }
-
-    @Published var selectedYear: Int {
-        didSet {
-            guard selectedYear != oldValue else { return }
-            recomputeMetrics()
+            propagateSelection()
         }
     }
 
@@ -79,39 +62,32 @@ final class ProfitAnalyticsViewModel: ObservableObject {
         !invoices.isEmpty || !revenueEntries.isEmpty
     }
 
-    var availableYears: [Int] {
-        periodOptions.availableYears(including: selectedYear)
-    }
-
     private let invoiceArchive: InvoiceArchive
     private let revenueStore: RevenueStoring
     private let driveConnector: GoogleDriveConnector
     private let metricStore: ExpenseMetricStore?
+    private let periodStore: ReportingPeriodStore?
+    private var isApplyingExternalSelection = false
     private let calendar: Calendar
     private var cancellables: Set<AnyCancellable> = []
     private var invoices: [CapturedInvoice] = []
     private var revenueEntries: [RevenueDayEntry] = []
     private var selectedExpenseMetric: ExpenseMetric
-    /// Rebuilt in `recomputeMetrics` rather than derived in `availableYears`, because the
-    /// year menu reads that property from `body` on every pass.
-    private var periodOptions: ReportingPeriodOptions
 
     init(invoiceArchive: InvoiceArchive,
          revenueStore: RevenueStoring,
          driveConnector: GoogleDriveConnector,
          metricStore: ExpenseMetricStore? = nil,
+         periodStore: ReportingPeriodStore? = nil,
          calendar: Calendar = .current) {
         self.invoiceArchive = invoiceArchive
         self.revenueStore = revenueStore
         self.driveConnector = driveConnector
         self.metricStore = metricStore
+        self.periodStore = periodStore
         self.calendar = calendar
         selectedExpenseMetric = metricStore?.selectedMetric ?? .totalAmount
-        periodOptions = ReportingPeriodOptions(dates: [], calendar: calendar)
-
-        let today = calendar.startOfDay(for: Date())
-        selectedMonth = calendar.component(.month, from: today)
-        selectedYear = calendar.component(.year, from: today)
+        selection = periodStore?.selection ?? ReportingPeriodSelection(period: .day, calendar: calendar)
 
         invoices = invoiceArchive.invoices
         isDriveLinked = driveConnector.authorizationState() == .linked
@@ -119,6 +95,7 @@ final class ProfitAnalyticsViewModel: ObservableObject {
         observeInvoices()
         observeDriveState()
         observeMetricStore()
+        observePeriodStore()
         recomputeMetrics()
     }
 
@@ -152,40 +129,12 @@ final class ProfitAnalyticsViewModel: ObservableObject {
 
     // MARK: - Display
 
-    var summaryTitle: String {
-        switch selectedPeriod {
-        case .week: "This Week"
-        case .month: "\(ReportingDateFormatter.name(for: selectedMonth)) \(selectedYear)"
-        case .year: "\(selectedYear)"
-        }
-    }
-
-    var summarySubtitle: String {
-        switch selectedPeriod {
-        case .week: weekRangeDescription ?? ""
-        case .month: "Selected Month"
-        case .year: "Calendar Year"
-        }
-    }
-
-    var weekRangeDescription: String? {
-        calendar.reportingWeek(containing: Date())?.description
-    }
-
     var profitText: String {
         summary.profit.formattedCurrency()
     }
 
     var profitPercentageText: String? {
         Self.percentageText(summary.profitPercentage).map { "\($0) of revenue" }
-    }
-
-    var monthPickerLabel: String {
-        "\(ReportingDateFormatter.name(for: selectedMonth)) \(selectedYear)"
-    }
-
-    var selectedDateRange: ReportingDateRange? {
-        calendar.range(for: selectedPeriod, month: selectedMonth, year: selectedYear)
     }
 
     func monthName(for month: Int) -> String {
@@ -249,15 +198,33 @@ final class ProfitAnalyticsViewModel: ObservableObject {
             .store(in: &cancellables)
     }
 
+    private func observePeriodStore() {
+        periodStore?.$selection
+            .dropFirst()
+            .receive(on: RunLoop.main)
+            .sink { [weak self] selection in
+                self?.applyExternalSelection(selection)
+            }
+            .store(in: &cancellables)
+    }
+
+    private func applyExternalSelection(_ incoming: ReportingPeriodSelection) {
+        guard selection != incoming else { return }
+        isApplyingExternalSelection = true
+        defer { isApplyingExternalSelection = false }
+        selection = incoming
+    }
+
+    private func propagateSelection() {
+        guard !isApplyingExternalSelection else { return }
+        periodStore?.set(selection)
+    }
+
     // MARK: - Aggregation
 
     private func recomputeMetrics() {
-        // Both sides feed the year menu: an invoice-only year and a revenue-only year are
-        // each worth offering.
-        periodOptions = ReportingPeriodOptions(dates: invoices.map(\.date) + revenueEntries.map(\.date),
-                                               calendar: calendar)
-        summary = selectedDateRange.map(summary(for:)) ?? ProfitSummary()
-        monthlyBreakdown = selectedPeriod == .year ? breakdown(forYear: selectedYear) : []
+        summary = selection.range.map(summary(for:)) ?? ProfitSummary()
+        monthlyBreakdown = selection.period == .year ? breakdown(forYear: selection.year) : []
     }
 
     private func summary(for range: ReportingDateRange) -> ProfitSummary {

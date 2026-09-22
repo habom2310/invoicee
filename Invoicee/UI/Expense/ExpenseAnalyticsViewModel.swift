@@ -41,25 +41,10 @@ final class ExpenseAnalyticsViewModel: ObservableObject {
         }
     }
 
-    @Published var selectedPeriod: ReportingPeriod = .month {
+    /// The period on show, shared with the revenue and profit tabs.
+    @Published var selection: ReportingPeriodSelection {
         didSet {
-            guard selectedPeriod != oldValue else { return }
-            recomputeAggregates()
-            propagatePeriodChange()
-            refreshRevenueTotal()
-        }
-    }
-
-    @Published var selectedYear: Int {
-        didSet {
-            guard selectedYear != oldValue else { return }
-            periodDidChange()
-        }
-    }
-
-    @Published var selectedMonth: Int {
-        didSet {
-            guard selectedMonth != oldValue else { return }
+            guard selection != oldValue else { return }
             periodDidChange()
         }
     }
@@ -73,9 +58,8 @@ final class ExpenseAnalyticsViewModel: ObservableObject {
     private let revenueSummaryProvider: RevenueSummaryProviding?
     private var cancellables = Set<AnyCancellable>()
     private var revenueTask: Task<Void, Never>?
-    private var isApplyingExternalPeriod = false
+    private var isApplyingExternalSelection = false
     private var isApplyingExternalMetric = false
-    private var periodOptions: ReportingPeriodOptions
 
     /// - Parameters:
     ///   - archive: Source of captured invoices.
@@ -94,15 +78,8 @@ final class ExpenseAnalyticsViewModel: ObservableObject {
         self.metricStore = metricStore
         self.revenueSummaryProvider = revenueSummaryProvider
 
-        let storedInvoices = archive.invoices
-        let options = ReportingPeriodOptions(dates: storedInvoices.map(\.date), calendar: calendar)
-        let clamped = options.clamped(month: periodStore?.selectedMonth ?? options.currentMonth,
-                                      year: periodStore?.selectedYear ?? options.currentYear)
-
-        invoices = storedInvoices
-        periodOptions = options
-        selectedMonth = clamped.month
-        selectedYear = clamped.year
+        invoices = archive.invoices
+        selection = periodStore?.selection ?? ReportingPeriodSelection(period: .day, calendar: calendar)
         if let metricStore {
             selectedMetric = metricStore.selectedMetric
         }
@@ -142,57 +119,17 @@ final class ExpenseAnalyticsViewModel: ObservableObject {
         !invoicesForSelection.isEmpty
     }
 
-    var availableYears: [Int] {
-        periodOptions.availableYears
-    }
-
-    var availableMonths: [Int] {
-        periodOptions.availableMonths(for: selectedYear)
-    }
-
-    var weekRangeDescription: String? {
-        calendar.reportingWeek(containing: Date())?.description
-    }
-
-    var monthPickerLabel: String {
-        "\(ReportingDateFormatter.shortName(for: selectedMonth))-\(selectedYear)"
-    }
-
     /// `true` when a revenue figure exists to compare the period's spend against.
     var hasRevenueComparison: Bool {
-        selectedPeriod == .month && monthlyRevenueTotal != nil
+        selection.period == .month && monthlyRevenueTotal != nil
     }
 
     /// The period's spend as a share of that month's revenue, e.g. "42% of revenue".
     var totalVsRevenueDescription: String? {
-        guard selectedPeriod == .month,
+        guard selection.period == .month,
               let revenue = monthlyRevenueTotal,
               revenue > 0 else { return nil }
         return "\(Self.percentText(totalForSelection / revenue)) of revenue"
-    }
-
-    var selectedPeriodDisplayTitle: String {
-        switch selectedPeriod {
-        case .week: "This Week"
-        case .month: "\(ReportingDateFormatter.shortName(for: selectedMonth)) \(selectedYear)"
-        case .year: "\(selectedYear)"
-        }
-    }
-
-    var selectedPeriodDetailDescription: String {
-        switch selectedPeriod {
-        case .week: weekRangeDescription ?? "Current Week"
-        case .month: "\(ReportingDateFormatter.name(for: selectedMonth)) \(selectedYear)"
-        case .year: "Calendar Year"
-        }
-    }
-
-    var selectedPeriodSentence: String {
-        switch selectedPeriod {
-        case .week: "this week"
-        case .month: "\(ReportingDateFormatter.shortName(for: selectedMonth)) \(selectedYear)"
-        case .year: "the year \(selectedYear)"
-        }
     }
 
     /// Formats a ratio, clamped to a range a display can hold. A mistyped invoice can
@@ -219,11 +156,11 @@ final class ExpenseAnalyticsViewModel: ObservableObject {
     /// picker change never publishes back into the middle of a view update.
     private func observeStores() {
         if let periodStore {
-            Publishers.CombineLatest(periodStore.$selectedMonth, periodStore.$selectedYear)
+            periodStore.$selection
                 .dropFirst()
                 .receive(on: RunLoop.main)
-                .sink { [weak self] month, year in
-                    self?.applyExternalPeriod(month: month, year: year)
+                .sink { [weak self] selection in
+                    self?.applyExternalSelection(selection)
                 }
                 .store(in: &cancellables)
         }
@@ -244,22 +181,14 @@ final class ExpenseAnalyticsViewModel: ObservableObject {
         if !invoices.isEmpty {
             errorMessage = nil
         }
-        periodOptions = ReportingPeriodOptions(dates: invoices.map(\.date), calendar: calendar)
-        // `clampSelection` re-enters `periodDidChange` and recomputes when it moves the
-        // selection, so only recompute here when it left the selection alone.
-        if !clampSelection() {
-            recomputeAggregates()
-        }
+        recomputeAggregates()
     }
 
-    private func applyExternalPeriod(month: Int, year: Int) {
-        guard selectedMonth != month || selectedYear != year else { return }
-        isApplyingExternalPeriod = true
-        defer { isApplyingExternalPeriod = false }
-        // Month first: setting the year alone can leave the old month unselectable for
-        // the new year and trigger a clamp that the incoming month would have satisfied.
-        selectedMonth = month
-        selectedYear = year
+    private func applyExternalSelection(_ incoming: ReportingPeriodSelection) {
+        guard selection != incoming else { return }
+        isApplyingExternalSelection = true
+        defer { isApplyingExternalSelection = false }
+        selection = incoming
     }
 
     private func applyExternalMetric(_ metric: ExpenseMetric) {
@@ -271,29 +200,17 @@ final class ExpenseAnalyticsViewModel: ObservableObject {
 
     // MARK: - Selection
 
-    /// Runs after any month/year change: clamps to a selectable period, refreshes
-    /// aggregates, and mirrors the choice into the shared store.
+    /// Runs after any period change: refreshes aggregates and mirrors the choice into
+    /// the shared store.
     private func periodDidChange() {
-        guard !clampSelection() else { return }
         recomputeAggregates()
         propagatePeriodChange()
         refreshRevenueTotal()
     }
 
-    /// Moves the selection onto an available period.
-    /// - Returns: `true` when a value was changed, which re-enters `periodDidChange`.
-    @discardableResult
-    private func clampSelection() -> Bool {
-        let clamped = periodOptions.clamped(month: selectedMonth, year: selectedYear)
-        guard clamped.month != selectedMonth || clamped.year != selectedYear else { return false }
-        selectedYear = clamped.year
-        selectedMonth = clamped.month
-        return true
-    }
-
     private func propagatePeriodChange() {
-        guard !isApplyingExternalPeriod, selectedPeriod == .month else { return }
-        periodStore?.set(month: selectedMonth, year: selectedYear)
+        guard !isApplyingExternalSelection else { return }
+        periodStore?.set(selection)
     }
 
     // MARK: - Aggregation
@@ -307,7 +224,7 @@ final class ExpenseAnalyticsViewModel: ObservableObject {
         totalForSelection = periodTotal
         totalGSTForSelection = filtered.reduce(.zero) { $0 + $1.gst }
 
-        let revenueTotal = selectedPeriod == .month ? monthlyRevenueTotal : nil
+        let revenueTotal = selection.period == .month ? monthlyRevenueTotal : nil
         categoryBreakdown = breakdown(of: filtered, periodTotal: periodTotal, revenueTotal: revenueTotal) {
             $0.category?.trimmed.nilIfEmpty ?? "Uncategorized"
         }
@@ -317,9 +234,7 @@ final class ExpenseAnalyticsViewModel: ObservableObject {
     }
 
     private func filteredInvoices() -> [CapturedInvoice] {
-        guard let range = calendar.range(for: selectedPeriod, month: selectedMonth, year: selectedYear) else {
-            return []
-        }
+        guard let range = selection.range else { return [] }
         return invoices
             .filter { calendar.isDay($0.date, in: range) }
             .sorted { $0.date > $1.date }
@@ -361,19 +276,19 @@ final class ExpenseAnalyticsViewModel: ObservableObject {
     private func refreshRevenueTotal() {
         revenueTask?.cancel()
 
-        guard selectedPeriod == .month, let provider = revenueSummaryProvider else {
+        guard selection.period == .month, let provider = revenueSummaryProvider else {
             guard monthlyRevenueTotal != nil else { return }
             monthlyRevenueTotal = nil
             recomputeAggregates()
             return
         }
 
-        let month = selectedMonth
-        let year = selectedYear
+        let month = selection.month
+        let year = selection.year
         revenueTask = Task { [weak self] in
             let total = await provider.totalRevenue(forMonth: month, year: year)
             guard !Task.isCancelled, let self else { return }
-            guard selectedMonth == month, selectedYear == year, monthlyRevenueTotal != total else { return }
+            guard selection.month == month, selection.year == year, monthlyRevenueTotal != total else { return }
             monthlyRevenueTotal = total
             // The breakdown rows carry a revenue share, so they are stale now.
             recomputeAggregates()

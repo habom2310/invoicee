@@ -13,7 +13,6 @@ struct ExpenseTabView: View {
     /// Rows shown before the "Show All" toggle reveals the rest.
     private static let breakdownLimit = 10
 
-    @State private var isShowingMonthPicker = false
     @State private var showAllCategoryRows = false
     @State private var showAllSupplierRows = false
 
@@ -49,18 +48,19 @@ struct ExpenseTabView: View {
 
     private var expenseList: some View {
         List {
-            filterSection
+            ReportingPeriodSelector(selection: $viewModel.selection)
+            metricSection
             totalSection
             breakdownSection(title: "Category Breakdown",
                              nameHeader: "Category",
                              rows: viewModel.categoryBreakdown,
-                             emptyMessage: "No categories with spending for \(viewModel.selectedPeriodSentence).",
+                             emptyMessage: "No categories with spending for \(viewModel.selection.title).",
                              showAll: $showAllCategoryRows,
                              explainMissingRevenue: true)
             breakdownSection(title: "Supplier Breakdown",
                              nameHeader: "Supplier",
                              rows: viewModel.supplierBreakdown,
-                             emptyMessage: "Supplier totals are unavailable for \(viewModel.selectedPeriodSentence).",
+                             emptyMessage: "Supplier totals are unavailable for \(viewModel.selection.title).",
                              showAll: $showAllSupplierRows,
                              explainMissingRevenue: false)
 
@@ -83,35 +83,32 @@ struct ExpenseTabView: View {
         .scrollContentBackground(.hidden)
         .background(Color.invoiceBackground)
         .refreshable { await viewModel.refresh() }
-        .sheet(isPresented: $isShowingMonthPicker) {
-            MonthYearPickerSheet(month: $viewModel.selectedMonth,
-                                 year: $viewModel.selectedYear,
-                                 months: viewModel.availableMonths,
-                                 years: viewModel.availableYears)
-        }
         // Collapse the expanded lists whenever the figures underneath them change, so a
         // 40-row list from one month does not stay open over a 3-row month.
-        .onChange(of: viewModel.selectedMonth) { _, _ in resetBreakdownExpansion() }
-        .onChange(of: viewModel.selectedYear) { _, _ in resetBreakdownExpansion() }
+        .onChange(of: viewModel.selection) { _, _ in resetBreakdownExpansion() }
         .onChange(of: viewModel.selectedMetric) { _, _ in resetBreakdownExpansion() }
-        .onChange(of: viewModel.selectedPeriod) { _, _ in resetBreakdownExpansion() }
     }
 
     private var totalSection: some View {
-        Section("\(viewModel.selectedMetric.displayName) for \(viewModel.selectedPeriodDisplayTitle)") {
+        Section(viewModel.selectedMetric.displayName) {
             VStack(alignment: .leading, spacing: 8) {
                 HStack(alignment: .firstTextBaseline) {
                     Text(viewModel.totalFormatted)
                         .font(.system(size: 34, weight: .bold, design: .rounded))
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.6)
                     Spacer()
                     Text("\(viewModel.totalGSTFormatted) GST")
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                 }
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(viewModel.selectedPeriodDetailDescription)
-                        .font(.subheadline)
-                        .foregroundStyle(.secondary)
+                    // The selector already names the period; this spells out its span.
+                    if let description = viewModel.selection.rangeDescription {
+                        Text(description)
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
+                    }
                     if let comparison = viewModel.totalVsRevenueDescription {
                         Text(comparison)
                             .font(.footnote)
@@ -123,34 +120,10 @@ struct ExpenseTabView: View {
         }
     }
 
-    private var filterSection: some View {
+    private var metricSection: some View {
         Section {
-            VStack(alignment: .leading, spacing: 12) {
-                metricSelector
-
-                Picker("Period", selection: $viewModel.selectedPeriod) {
-                    ForEach(ReportingPeriod.allCases) { period in
-                        Text(period.displayName).tag(period)
-                    }
-                }
-                .pickerStyle(.segmented)
-
-                switch viewModel.selectedPeriod {
-                case .week:
-                    if let description = viewModel.weekRangeDescription {
-                        Text(description)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-                case .month:
-                    MonthPickerButton(title: viewModel.monthPickerLabel) {
-                        isShowingMonthPicker = true
-                    }
-                case .year:
-                    YearMenuButton(selection: $viewModel.selectedYear, years: viewModel.availableYears)
-                }
-            }
-            .padding(.vertical, 4)
+            metricSelector
+                .padding(.vertical, 4)
         }
     }
 
@@ -200,7 +173,7 @@ struct ExpenseTabView: View {
                                       rows: showAll.wrappedValue ? rows : Array(rows.prefix(Self.breakdownLimit)),
                                       revenueAvailable: viewModel.hasRevenueComparison)
 
-                if explainMissingRevenue, viewModel.selectedPeriod == .month, !viewModel.hasRevenueComparison {
+                if explainMissingRevenue, viewModel.selection.period == .month, !viewModel.hasRevenueComparison {
                     Text("Revenue % becomes available once revenue is recorded for this month.")
                         .font(.caption2)
                         .foregroundStyle(.secondary)
@@ -249,9 +222,10 @@ struct ExpenseTabView: View {
         let invoices = viewModel.invoicesForSelection
         guard !invoices.isEmpty else { return }
 
-        let month = ReportingDateFormatter.fileNameMonth(for: viewModel.selectedMonth)
+        // Named for the period actually on show; it used to always say the month, even
+        // when the figures were a week's.
         export.export(rows: CSVExporting.invoiceRows(from: invoices, uncategorizedLabel: "Uncategorized"),
-                      filename: "expense_\(month)_\(viewModel.selectedYear).csv",
+                      filename: "expense_\(viewModel.selection.exportIdentifier).csv",
                       mirroringTo: driveConnector)
     }
 }

@@ -9,6 +9,7 @@ import Combine
 @MainActor
 final class AppEnvironment: ObservableObject {
     let reportingPeriodStore: ReportingPeriodStore
+    let invoiceMonthStore: InvoiceMonthStore
     let invoiceArchive: InvoiceArchive
     let driveConnector: GoogleDriveConnector
     let firestoreUploader: InvoiceFirestoreUploading
@@ -22,6 +23,7 @@ final class AppEnvironment: ObservableObject {
     private var cancellables: Set<AnyCancellable> = []
 
     init(reportingPeriodStore: ReportingPeriodStore,
+         invoiceMonthStore: InvoiceMonthStore,
          invoiceArchive: InvoiceArchive,
          driveConnector: GoogleDriveConnector,
          firestoreUploader: InvoiceFirestoreUploading,
@@ -32,6 +34,7 @@ final class AppEnvironment: ObservableObject {
          revenueSummaryProvider: RevenueSummaryProviding,
          expenseMetricStore: ExpenseMetricStore) {
         self.reportingPeriodStore = reportingPeriodStore
+        self.invoiceMonthStore = invoiceMonthStore
         self.invoiceArchive = invoiceArchive
         self.driveConnector = driveConnector
         self.firestoreUploader = firestoreUploader
@@ -66,14 +69,16 @@ final class AppEnvironment: ObservableObject {
     func makeRevenueViewModel() -> RevenueViewModel {
         RevenueViewModel(store: revenueStore,
                          driveConnector: driveConnector,
-                         summaryProvider: revenueSummaryProvider)
+                         summaryProvider: revenueSummaryProvider,
+                         periodStore: reportingPeriodStore)
     }
 
     func makeProfitViewModel() -> ProfitAnalyticsViewModel {
         ProfitAnalyticsViewModel(invoiceArchive: invoiceArchive,
                                  revenueStore: revenueStore,
                                  driveConnector: driveConnector,
-                                 metricStore: expenseMetricStore)
+                                 metricStore: expenseMetricStore,
+                                 periodStore: reportingPeriodStore)
     }
 
     // MARK: - Composition root
@@ -100,6 +105,7 @@ final class AppEnvironment: ObservableObject {
 
         let revenueStore = RevenueFirestoreStore()
         return AppEnvironment(reportingPeriodStore: ReportingPeriodStore(),
+                              invoiceMonthStore: InvoiceMonthStore(),
                               invoiceArchive: invoiceArchive,
                               driveConnector: connector,
                               firestoreUploader: firestoreUploader,

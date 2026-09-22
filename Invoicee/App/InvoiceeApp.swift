@@ -39,6 +39,7 @@ extension View {
             .environmentObject(environment)
             .environmentObject(environment.invoiceArchive)
             .environmentObject(environment.reportingPeriodStore)
+            .environmentObject(environment.invoiceMonthStore)
             .environmentObject(environment.driveConnector)
             .environmentObject(environment.categoryStore)
     }

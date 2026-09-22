@@ -51,6 +51,11 @@ nonisolated enum ReportingDateFormatter {
         isoDayFormatter.string(from: date)
     }
 
+    /// Localised full weekday name, e.g. "Tuesday".
+    static func weekdayName(_ date: Date) -> String {
+        weekdayFormatter.string(from: date)
+    }
+
     /// Localised `MMM yyyy`, used for monthly rollup rows.
     static func monthAndYear(_ date: Date) -> String {
         monthYearFormatter.string(from: date)
@@ -109,6 +114,12 @@ nonisolated enum ReportingDateFormatter {
         let formatter = DateFormatter()
         formatter.dateStyle = .medium
         formatter.timeStyle = .none
+        return formatter
+    }()
+
+    private static let weekdayFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.setLocalizedDateFormatFromTemplate("EEEE")
         return formatter
     }()
 

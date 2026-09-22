@@ -5,7 +5,6 @@ struct RevenueTabView: View {
     @EnvironmentObject private var driveConnector: GoogleDriveConnector
     @StateObject private var viewModel: RevenueViewModel
     @StateObject private var export = CSVExportController()
-    @State private var isShowingMonthPicker = false
 
     init(viewModel: @autoclosure @escaping () -> RevenueViewModel) {
         _viewModel = StateObject(wrappedValue: viewModel())
@@ -60,7 +59,7 @@ struct RevenueTabView: View {
 
     private var revenueList: some View {
         List {
-            filterControls
+            ReportingPeriodSelector(selection: $viewModel.selection)
             summarySection
             entriesSection
             WarningSection(viewModel.errorMessage)
@@ -73,17 +72,12 @@ struct RevenueTabView: View {
             }
         }
         .background(Color.invoiceBackground)
-        .sheet(isPresented: $isShowingMonthPicker) {
-            MonthYearPickerSheet(month: $viewModel.selectedMonth,
-                                 year: $viewModel.selectedYear,
-                                 years: viewModel.availableYears)
-        }
     }
 
     private var entriesSection: some View {
-        Section(viewModel.selectedPeriod == .year ? "Monthly Revenue" : "Daily Revenue") {
+        Section(viewModel.selection.period == .year ? "Monthly Revenue" : "Daily Revenue") {
             if viewModel.listEntries.isEmpty {
-                Label("No revenue recorded yet.", systemImage: "chart.line.uptrend.xyaxis")
+                Label("No revenue recorded for this period.", systemImage: "chart.line.uptrend.xyaxis")
                     .foregroundStyle(.secondary)
                     .padding(.vertical, 8)
             } else {
@@ -103,48 +97,29 @@ struct RevenueTabView: View {
         }
     }
 
-    private var filterControls: some View {
-        Section {
-            VStack(alignment: .leading, spacing: 12) {
-                Picker("Period", selection: $viewModel.selectedPeriod) {
-                    ForEach(ReportingPeriod.allCases) { period in
-                        Text(period.displayName).tag(period)
-                    }
-                }
-                .pickerStyle(.segmented)
-
-                switch viewModel.selectedPeriod {
-                case .week:
-                    Text(viewModel.summarySubtitle)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                case .month:
-                    MonthPickerButton(title: "\(ReportingDateFormatter.name(for: viewModel.selectedMonth)) \(viewModel.selectedYear)") {
-                        isShowingMonthPicker = true
-                    }
-                case .year:
-                    YearMenuButton(selection: $viewModel.selectedYear, years: viewModel.availableYears)
-                }
-            }
-            .padding(.vertical, 4)
-        }
-    }
-
     private var summarySection: some View {
         Section {
             VStack(alignment: .leading, spacing: 8) {
                 HStack(alignment: .firstTextBaseline) {
                     VStack(alignment: .leading, spacing: 4) {
-                        Text(viewModel.summaryTitle)
+                        Text("Total Revenue")
                             .font(.headline)
-                        Text(viewModel.summarySubtitle)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
+                        // Only worth saying when there is a figure beside it to compare.
+                        if viewModel.periodComparison != nil {
+                            Text(viewModel.selection.comparisonLabel)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
                     }
                     Spacer()
                     VStack(alignment: .trailing, spacing: 2) {
                         Text(viewModel.summaryTotalFormatted)
                             .font(.system(size: 28, weight: .bold, design: .rounded))
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.6)
+                        if let comparison = viewModel.periodComparison {
+                            PeriodComparisonBadge(comparison: comparison)
+                        }
                         Text("Plus \(viewModel.summaryGSTFormatted) GST")
                             .font(.caption)
                             .foregroundStyle(.secondary)
@@ -170,20 +145,12 @@ struct RevenueTabView: View {
         let entries = viewModel.listEntries
         guard !entries.isEmpty else { return }
         export.export(rows: makeRevenueRows(from: entries),
-                      filename: "revenue_\(periodIdentifier).csv",
+                      filename: "revenue_\(viewModel.selection.exportIdentifier).csv",
                       mirroringTo: driveConnector)
     }
 
-    private var periodIdentifier: String {
-        switch viewModel.selectedPeriod {
-        case .week: ReportingDateFormatter.weekIdentifier(viewModel.currentWeekRange)
-        case .month: ReportingDateFormatter.monthIdentifier(month: viewModel.selectedMonth, year: viewModel.selectedYear)
-        case .year: "\(viewModel.selectedYear)"
-        }
-    }
-
     private func makeRevenueRows(from entries: [RevenueDayEntry]) -> [[String]] {
-        let isYearly = viewModel.selectedPeriod == .year
+        let isYearly = viewModel.selection.period == .year
         var rows: [[String]] = [[isYearly ? "Month" : "Date", "Stream", "Amount"]]
         var total: Decimal = .zero
 
@@ -245,6 +212,72 @@ private struct RevenueEntryRow: View {
             }
         }
         .padding(.vertical, 4)
+    }
+}
+
+/// `($1,000.00 ↑ 20%)` - what the period before this one earned over the same span,
+/// and which way the total has moved since.
+private struct PeriodComparisonBadge: View {
+    let comparison: RevenuePeriodComparison
+
+    var body: some View {
+        label
+            .font(.caption)
+            // Wrapping beats truncating: at accessibility text sizes a single line
+            // clips the arrow and the percentage, which is the whole point of the badge.
+            .lineLimit(2)
+            // Enough headroom for the amount to stay whole on its own line rather than
+            // breaking mid-number, which the widest text sizes would otherwise force.
+            .minimumScaleFactor(0.6)
+            .multilineTextAlignment(.trailing)
+            .accessibilityLabel(accessibilityDescription)
+    }
+
+    /// Built by concatenation rather than an `HStack` so the arrow sits on the text
+    /// baseline and scales with the caption like any other glyph.
+    private var label: Text {
+        var text = Text(verbatim: "(\(comparison.previousTotal.formattedCurrency()) ")
+            .foregroundStyle(.secondary)
+        text = text + Text(Image(systemName: symbolName)).foregroundStyle(tint)
+        if let percentText {
+            text = text + Text(verbatim: " \(percentText)").foregroundStyle(tint)
+        }
+        return text + Text(verbatim: ")").foregroundStyle(.secondary)
+    }
+
+    private var symbolName: String {
+        switch comparison.direction {
+        case .up: "arrow.up"
+        case .down: "arrow.down"
+        case .unchanged: "equal"
+        }
+    }
+
+    private var tint: Color {
+        switch comparison.direction {
+        case .up: .green
+        case .down: .red
+        case .unchanged: .secondary
+        }
+    }
+
+    /// The arrow already carries the sign, so the percentage is shown unsigned.
+    private var percentText: String? {
+        guard let change = comparison.percentChange else { return nil }
+        return ExpenseAnalyticsViewModel.percentText(abs(change))
+    }
+
+    private var accessibilityDescription: String {
+        let prefix = "Compared with \(comparison.previousTotal.formattedCurrency())"
+            + " for \(comparison.previousRange.description)"
+        switch comparison.direction {
+        case .unchanged:
+            return "\(prefix), unchanged."
+        case .up, .down:
+            let word = comparison.direction == .up ? "up" : "down"
+            guard let percentText else { return "\(prefix), \(word)." }
+            return "\(prefix), \(word) \(percentText)."
+        }
     }
 }
 

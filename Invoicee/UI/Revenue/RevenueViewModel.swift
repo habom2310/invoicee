@@ -29,30 +29,15 @@ final class RevenueViewModel: ObservableObject {
     @Published private(set) var listEntries: [RevenueDayEntry] = []
     @Published private(set) var streamTotalsForSelection: [RevenueStreamValue] = []
     @Published private(set) var summaryTotal: Decimal = .zero
+    /// `nil` when neither this period nor the one before it earned anything.
+    @Published private(set) var periodComparison: RevenuePeriodComparison?
 
-    @Published var selectedPeriod: ReportingPeriod = .week {
+    /// The period on show, shared with the expense and profit tabs.
+    @Published var selection: ReportingPeriodSelection {
         didSet {
-            guard selectedPeriod != oldValue else { return }
+            guard selection != oldValue else { return }
             recomputeSelection()
-        }
-    }
-
-    @Published var selectedMonth: Int {
-        didSet {
-            let clamped = min(max(selectedMonth, 1), 12)
-            guard clamped == selectedMonth else {
-                selectedMonth = clamped
-                return
-            }
-            guard selectedMonth != oldValue else { return }
-            recomputeSelection()
-        }
-    }
-
-    @Published var selectedYear: Int {
-        didSet {
-            guard selectedYear != oldValue else { return }
-            recomputeSelection()
+            propagateSelection()
         }
     }
 
@@ -66,29 +51,28 @@ final class RevenueViewModel: ObservableObject {
     private let store: RevenueStoring
     private let driveConnector: GoogleDriveConnector
     private let summaryProvider: RevenueSummaryProviding?
+    private let periodStore: ReportingPeriodStore?
     private let calendar: Calendar
     private var cancellables = Set<AnyCancellable>()
-    /// Rebuilt in `applyEntries` rather than derived in `availableYears`, because the
-    /// year menu reads that property from `body` on every pass.
-    private var periodOptions: ReportingPeriodOptions
+    private var isApplyingExternalSelection = false
 
     init(store: RevenueStoring,
          driveConnector: GoogleDriveConnector,
          summaryProvider: RevenueSummaryProviding? = nil,
+         periodStore: ReportingPeriodStore? = nil,
          calendar: Calendar = .current) {
         self.store = store
         self.driveConnector = driveConnector
         self.summaryProvider = summaryProvider
+        self.periodStore = periodStore
         self.calendar = calendar
-        periodOptions = ReportingPeriodOptions(dates: [], calendar: calendar)
 
-        let today = calendar.startOfDay(for: Date())
-        selectedMonth = calendar.component(.month, from: today)
-        selectedYear = calendar.component(.year, from: today)
-        formDate = today
+        selection = periodStore?.selection ?? ReportingPeriodSelection(period: .day, calendar: calendar)
+        formDate = calendar.startOfDay(for: Date())
 
         canRecordRevenue = driveConnector.authorizationState() == .linked
         observeDriveState()
+        observePeriodStore()
         // The view's `.task` performs the first load; the observer covers later links.
     }
 
@@ -120,36 +104,6 @@ final class RevenueViewModel: ObservableObject {
 
     // MARK: - Summary
 
-    /// The range the current selection covers.
-    var selectedDateRange: ReportingDateRange? {
-        calendar.range(for: selectedPeriod, month: selectedMonth, year: selectedYear)
-    }
-
-    var currentWeekRange: ReportingDateRange? {
-        calendar.reportingWeek(containing: Date())
-    }
-
-    var summaryTitle: String {
-        switch selectedPeriod {
-        case .week:
-            "This Week"
-        case .month:
-            isViewingCurrentMonth
-                ? "This Month"
-                : "\(ReportingDateFormatter.name(for: selectedMonth)) \(selectedYear)"
-        case .year:
-            "\(selectedYear)"
-        }
-    }
-
-    var summarySubtitle: String {
-        switch selectedPeriod {
-        case .week: currentWeekRange?.description ?? ""
-        case .month: isViewingCurrentMonth ? ReportingDateFormatter.name(for: selectedMonth) : "Custom Month"
-        case .year: "Calendar Year"
-        }
-    }
-
     var summaryTotalFormatted: String {
         summaryTotal.formattedCurrency()
     }
@@ -162,10 +116,6 @@ final class RevenueViewModel: ObservableObject {
 
     var summaryGSTFormatted: String {
         summaryGST.formattedCurrency()
-    }
-
-    var availableYears: [Int] {
-        periodOptions.availableYears(including: selectedYear)
     }
 
     // MARK: - Form
@@ -235,19 +185,41 @@ final class RevenueViewModel: ObservableObject {
     }
 
     func displayTitle(for entry: RevenueDayEntry) -> String {
-        guard selectedPeriod == .year else { return ReportingDateFormatter.mediumDate(entry.date) }
+        guard selection.period == .year else { return ReportingDateFormatter.mediumDate(entry.date) }
         return ReportingDateFormatter.monthAndYear(entry.date)
     }
 
     /// Whether tapping a row can open the editor. Yearly rows are rollups of many days,
     /// so there is no single entry to edit.
     var rowsAreEditable: Bool {
-        selectedPeriod != .year
+        selection.period != .year
     }
 
     // MARK: - Private helpers
 
     private static let linkPromptMessage = "Link Google Drive to start tracking revenue."
+
+    private func observePeriodStore() {
+        periodStore?.$selection
+            .dropFirst()
+            .receive(on: RunLoop.main)
+            .sink { [weak self] selection in
+                self?.applyExternalSelection(selection)
+            }
+            .store(in: &cancellables)
+    }
+
+    private func applyExternalSelection(_ incoming: ReportingPeriodSelection) {
+        guard selection != incoming else { return }
+        isApplyingExternalSelection = true
+        defer { isApplyingExternalSelection = false }
+        selection = incoming
+    }
+
+    private func propagateSelection() {
+        guard !isApplyingExternalSelection else { return }
+        periodStore?.set(selection)
+    }
 
     private func observeDriveState() {
         driveConnector.$state
@@ -278,31 +250,48 @@ final class RevenueViewModel: ObservableObject {
                                    streams: $0.streams) }
             .sorted { $0.date > $1.date }
         knownStreams = Self.distinctStreams(from: entries)
-        periodOptions = ReportingPeriodOptions(dates: entries.map(\.date), calendar: calendar)
         recomputeSelection()
     }
 
     private func recomputeSelection() {
-        guard !entries.isEmpty, let range = selectedDateRange else {
+        guard !entries.isEmpty, let range = selection.range else {
             listEntries = []
             streamTotalsForSelection = []
             summaryTotal = .zero
+            periodComparison = nil
             return
         }
 
         let inRange = entries.filter { calendar.isDay($0.date, in: range) }
         summaryTotal = inRange.reduce(.zero) { $0 + $1.total }
         streamTotalsForSelection = Self.streamTotals(in: inRange)
-        listEntries = selectedPeriod == .year ? monthlyRollups(of: inRange) : inRange
+        listEntries = selection.period == .year ? monthlyRollups(of: inRange) : inRange
+        periodComparison = comparison(currentTotal: summaryTotal)
+    }
+
+    /// Measures the selection against the same elapsed span of the period before it.
+    ///
+    /// `currentTotal` is the figure the summary already shows rather than one clipped to
+    /// today, so the percentage always describes the number beside it. The two agree
+    /// because the form will not record revenue past today.
+    ///
+    /// Suppressed when both spans are empty: "no revenue, unchanged" is noise on a
+    /// screen that already shows a zero total.
+    private func comparison(currentTotal: Decimal) -> RevenuePeriodComparison? {
+        guard let previousRange = selection.precedingRange() else { return nil }
+
+        let previousTotal = entries
+            .filter { calendar.isDay($0.date, in: previousRange) }
+            .reduce(Decimal.zero) { $0 + $1.total }
+        guard previousTotal > 0 || currentTotal > 0 else { return nil }
+
+        return RevenuePeriodComparison(currentTotal: currentTotal,
+                                       previousTotal: previousTotal,
+                                       previousRange: previousRange)
     }
 
     private func entry(for date: Date) -> RevenueDayEntry? {
         entries.first { calendar.isDate($0.date, inSameDayAs: date) }
-    }
-
-    private var isViewingCurrentMonth: Bool {
-        let today = calendar.dateComponents([.year, .month], from: Date())
-        return today.month == selectedMonth && today.year == selectedYear
     }
 
     /// Pre-fills the form: the day's existing streams, else the known stream names.

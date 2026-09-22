@@ -32,11 +32,13 @@ Invoicee/
       Models/
         CapturedInvoice.swift       # Invoice, ManualInvoiceData, ManualInvoiceItem
         ExpenseMetric.swift         # Total vs Our Amount
-        ReportingPeriod.swift       # Week/Month/Year + Calendar range helper
+        ReportingPeriod.swift       # Day/Week/Month/Year + Calendar range helpers
+        ReportingPeriodSelection.swift  # A period + the anchor date it sits on
       Stores/
         InvoiceArchive.swift        # Single source of truth for invoices
         InvoiceCategoryStore.swift  # Categories + supplier→category memory
-        ReportingPeriodStore.swift  # Shared month/year selection
+        ReportingPeriodStore.swift  # The period the three reporting tabs share
+        InvoiceMonthStore.swift     # The month the invoice list is showing
         ReportingPeriodOptions.swift# Which periods are selectable, and clamping
         ExpenseMetricStore.swift    # Shared metric selection
       Persistence/
@@ -75,7 +77,8 @@ Invoicee/
     Components/
       CSVExportController.swift     # Shared "build CSV → save sheet → mirror to Drive"
       MonthYearPickerSheet.swift
-      ReportingControls.swift       # YearMenuButton, WarningSection
+      ReportingControls.swift       # WarningSection
+      ReportingPeriodSelector.swift # Shared period control + timeframe sheet
     Invoice/
       InvoiceTabView.swift
       InvoiceCaptureSheet.swift     # Camera / photo / PDF capture
@@ -151,24 +154,57 @@ aggregates once, and publishes the *finished* figures — including percentages.
 published values and never aggregate in `body`, because `body` runs several times per
 update and each of those aggregations walks the whole archive.
 
-`ReportingPeriodStore` and `ExpenseMetricStore` let the tabs share a selection. The
-subscriptions are delivered on `RunLoop.main` so a picker change never publishes back into
-the middle of a view update.
+`ReportingPeriodStore` and `ExpenseMetricStore` let the tabs share a selection. Each view
+model keeps its own copy and mirrors the store both ways, guarded by an
+`isApplyingExternal…` flag so the echo stops there. The subscriptions are delivered on
+`RunLoop.main` so a change never publishes back into the middle of a view update.
 
-`ReportingPeriodOptions` is the only place a year list is derived. Expense, Revenue, and
-Profit each used to build their own, and the three had drifted: one excluded future years,
-one added the current year, one added neither. They now differ only in how they keep a
-`Picker` from rendering blank when its selection holds no data — a `Picker` whose selection
-is absent from its options shows nothing:
+`ReportingPeriodOptions` is the only place a year list is derived. Expense and Profit each
+used to build their own, and they had drifted: one excluded future years, one added the
+current year, one added neither. They now differ only in how they keep a `Picker` from
+rendering blank when its selection holds no data — a `Picker` whose selection is absent
+from its options shows nothing:
 
 - Invoice and Expense **clamp the selection** onto the options (`clamped(month:year:)`).
-- Revenue and Profit **widen the options** to include the selection
-  (`availableYears(including:)`), because their selection is free to roam.
+- Profit **widens the options** to include the selection (`availableYears(including:)`),
+  because its selection is free to roam.
 
 Each view model rebuilds its options when its data changes, not inside `availableYears` —
 the year menu reads that property from `body` on every pass. Month lists are unchanged:
-Invoice and Expense restrict them via `availableMonths(for:)`, while Revenue and Profit
-still offer all twelve.
+Invoice and Expense restrict them via `availableMonths(for:)`, while Profit still offers
+all twelve.
+
+## How the reporting tabs choose a period
+
+All three navigate rather than pick, and all three navigate **together**.
+`ReportingPeriodSelection` pairs a `ReportingPeriod` with an **anchor date**, and
+`ReportingPeriodSelector` — one control, shared — steps that anchor one whole
+`spanComponent` back or forward, or opens the timeframe sheet to switch between Today,
+This week, This month and This year. Each view model owns a single
+`@Published var selection`, recomputes from it, and mirrors it through
+`ReportingPeriodStore`: the three tabs answer questions about the same stretch of
+trading, so choosing a period on any one of them moves the other two.
+
+Two invariants make the arithmetic safe:
+
+- The anchor is always the **first day of its period**, otherwise stepping back from a
+  31st would land on a 28th and stay there.
+- Forward travel stops at the period in progress, since nothing can be recorded past
+  today.
+
+`precedingRange(for:matching:)` is what a period is measured against. A period still in
+progress compares like for like — on a Wednesday, "this week" measures against last week
+up to *its* Wednesday — while a finished one compares against the whole of the period
+before it. A day is the exception: it compares against the same weekday a week earlier
+(`comparisonComponent`), because takings swing too hard between weekdays for yesterday to
+mean anything. Only Revenue renders that comparison today; the type is screen-agnostic.
+
+The invoice list is the one screen that still *picks*, and it sits outside that share. It
+drives its own `InvoiceMonthStore` through `MonthYearPickerSheet`, clamping onto
+`ReportingPeriodOptions` so its picker never renders a month it does not offer. That clamp
+runs on appear and whenever the invoice count changes, so pointing it at the shared store
+would move all three reports to whichever month happens to hold invoices — which is why
+the two stores are separate.
 
 ## Known issue: GST is treated as exclusive
 

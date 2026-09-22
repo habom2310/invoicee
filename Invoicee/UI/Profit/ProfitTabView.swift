@@ -5,7 +5,6 @@ struct ProfitTabView: View {
     @EnvironmentObject private var driveConnector: GoogleDriveConnector
     @StateObject private var viewModel: ProfitAnalyticsViewModel
     @StateObject private var export = CSVExportController()
-    @State private var isShowingMonthPicker = false
 
     init(viewModel: @autoclosure @escaping () -> ProfitAnalyticsViewModel) {
         _viewModel = StateObject(wrappedValue: viewModel())
@@ -36,19 +35,14 @@ struct ProfitTabView: View {
         }
         .task { await viewModel.refresh() }
         .csvExporter(export)
-        .sheet(isPresented: $isShowingMonthPicker) {
-            MonthYearPickerSheet(month: $viewModel.selectedMonth,
-                                 year: $viewModel.selectedYear,
-                                 years: viewModel.availableYears)
-        }
     }
 
     private var profitList: some View {
         List {
-            filterSection
+            ReportingPeriodSelector(selection: $viewModel.selection)
             summarySection
 
-            if viewModel.selectedPeriod == .year {
+            if viewModel.selection.period == .year {
                 yearlyBreakdownSection
             }
 
@@ -75,44 +69,16 @@ struct ProfitTabView: View {
         }
     }
 
-    private var filterSection: some View {
-        Section {
-            VStack(alignment: .leading, spacing: 12) {
-                Picker("Period", selection: $viewModel.selectedPeriod) {
-                    ForEach(ReportingPeriod.allCases) { period in
-                        Text(period.displayName).tag(period)
-                    }
-                }
-                .pickerStyle(.segmented)
-
-                switch viewModel.selectedPeriod {
-                case .week:
-                    if let description = viewModel.weekRangeDescription {
-                        Text(description)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-                case .month:
-                    MonthPickerButton(title: viewModel.monthPickerLabel) {
-                        isShowingMonthPicker = true
-                    }
-                case .year:
-                    YearMenuButton(selection: $viewModel.selectedYear, years: viewModel.availableYears)
-                }
-            }
-            .padding(.vertical, 4)
-        }
-    }
-
     private var summarySection: some View {
         Section {
             VStack(alignment: .leading, spacing: 8) {
                 HStack(alignment: .firstTextBaseline) {
                     VStack(alignment: .leading, spacing: 4) {
-                        Text(viewModel.summaryTitle)
+                        Text("Profit")
                             .font(.headline)
-                        if !viewModel.summarySubtitle.isEmpty {
-                            Text(viewModel.summarySubtitle)
+                        // The selector already names the period; this spells out its span.
+                        if let description = viewModel.selection.rangeDescription {
+                            Text(description)
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
                         }
@@ -120,6 +86,9 @@ struct ProfitTabView: View {
                     Spacer()
                     Text(viewModel.profitText)
                         .font(.system(size: 32, weight: .bold, design: .rounded))
+                        // A year's figure is wide enough to wrap and orphan a digit.
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.6)
                 }
 
                 Text(viewModel.profitPercentageText ?? "No revenue recorded for this period yet.")
@@ -134,7 +103,7 @@ struct ProfitTabView: View {
     private var yearlyBreakdownSection: some View {
         Section("Monthly Profit") {
             if viewModel.monthlyBreakdown.isEmpty {
-                Text("No profit data for \(viewModel.selectedYear) yet.")
+                Text("No profit data for \(viewModel.selection.title) yet.")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
                     .padding(.vertical, 4)
@@ -151,16 +120,8 @@ struct ProfitTabView: View {
     private func startProfitExport() {
         guard viewModel.hasAnyData else { return }
         export.export(rows: makeProfitRows(),
-                      filename: "profit_\(periodIdentifier).csv",
+                      filename: "profit_\(viewModel.selection.exportIdentifier).csv",
                       mirroringTo: driveConnector)
-    }
-
-    private var periodIdentifier: String {
-        switch viewModel.selectedPeriod {
-        case .week: ReportingDateFormatter.weekIdentifier(viewModel.selectedDateRange)
-        case .month: ReportingDateFormatter.monthIdentifier(month: viewModel.selectedMonth, year: viewModel.selectedYear)
-        case .year: "\(viewModel.selectedYear)"
-        }
     }
 
     private func makeProfitRows() -> [[String]] {
@@ -176,7 +137,7 @@ struct ProfitTabView: View {
             ["Profit %", percentOrNA(summary.profitPercentage)]
         ]
 
-        guard viewModel.selectedPeriod == .year, !viewModel.monthlyBreakdown.isEmpty else { return rows }
+        guard viewModel.selection.period == .year, !viewModel.monthlyBreakdown.isEmpty else { return rows }
 
         rows.append(["", ""])
         rows.append(Self.monthlyHeader)
