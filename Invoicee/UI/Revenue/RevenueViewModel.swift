@@ -254,7 +254,7 @@ final class RevenueViewModel: ObservableObject {
     }
 
     private func recomputeSelection() {
-        guard !entries.isEmpty, let range = selection.range else {
+        guard !entries.isEmpty else {
             listEntries = []
             streamTotalsForSelection = []
             summaryTotal = .zero
@@ -262,7 +262,7 @@ final class RevenueViewModel: ObservableObject {
             return
         }
 
-        let inRange = entries.filter { calendar.isDay($0.date, in: range) }
+        let inRange = entries.filter { calendar.isDay($0.date, in: selection.range) }
         summaryTotal = inRange.reduce(.zero) { $0 + $1.total }
         streamTotalsForSelection = Self.streamTotals(in: inRange)
         listEntries = selection.period == .year ? monthlyRollups(of: inRange) : inRange

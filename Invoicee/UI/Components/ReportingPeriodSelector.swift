@@ -38,8 +38,7 @@ struct ReportingPeriodSelector: View {
             // edges instead of inside a second rounded box.
             .listRowInsets(EdgeInsets(top: 4, leading: 8, bottom: 4, trailing: 8))
             .sheet(isPresented: $isShowingTimeframe) {
-                TimeframeSheet(period: Binding(get: { selection.period },
-                                               set: { selection = selection.selecting($0) }))
+                TimeframeSheet(selection: $selection)
             }
         }
     }
@@ -64,8 +63,9 @@ struct ReportingPeriodSelector: View {
 
 /// Picks how wide a span a report covers, and jumps to the one in progress.
 private struct TimeframeSheet: View {
-    @Binding var period: ReportingPeriod
+    @Binding var selection: ReportingPeriodSelection
     @Environment(\.dismiss) private var dismiss
+    @State private var isEditingCustomRange = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -84,27 +84,139 @@ private struct TimeframeSheet: View {
             .padding(.top, 24)
 
             List {
-                ForEach(ReportingPeriod.allCases) { option in
-                    Button {
-                        period = option
+                ForEach(ReportingPeriod.presetCases) { option in
+                    row(for: option) {
+                        selection = selection.selecting(option)
                         dismiss()
                     } label: {
-                        HStack {
-                            Text(option.timeframeName)
-                                .foregroundStyle(.primary)
-                            Spacer()
-                            Image(systemName: period == option ? "largecircle.fill.circle" : "circle")
-                                .foregroundStyle(period == option ? Color.accentColor : .secondary)
-                        }
-                        .contentShape(Rectangle())
+                        Text(option.timeframeName)
+                            .foregroundStyle(.primary)
                     }
-                    .buttonStyle(.plain)
-                    .accessibilityAddTraits(period == option ? [.isButton, .isSelected] : .isButton)
+                }
+
+                row(for: .custom) {
+                    isEditingCustomRange = true
+                } label: {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(ReportingPeriod.custom.timeframeName)
+                            .foregroundStyle(.primary)
+                        // Only meaningful once the editor has produced dates.
+                        if selection.period.isCustom {
+                            Text(selection.range.description)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
                 }
             }
             .listStyle(.insetGrouped)
             .scrollContentBackground(.hidden)
         }
         .presentationDetents([.medium])
+        .sheet(isPresented: $isEditingCustomRange) {
+            CustomRangeSheet(range: selection.range) { picked in
+                selection = selection.selectingCustom(picked)
+                dismiss()
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func row(for option: ReportingPeriod,
+                     action: @escaping () -> Void,
+                     @ViewBuilder label: () -> some View) -> some View {
+        let isSelected = selection.period == option
+        Button(action: action) {
+            HStack {
+                label()
+                Spacer()
+                if option.isCustom, isSelected {
+                    Text("Edit")
+                        .font(.callout)
+                        .foregroundStyle(Color.accentColor)
+                }
+                Image(systemName: isSelected ? "largecircle.fill.circle" : "circle")
+                    .foregroundStyle(isSelected ? Color.accentColor : .secondary)
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityAddTraits(isSelected ? [.isButton, .isSelected] : .isButton)
+    }
+}
+
+/// Picks the span a custom selection covers, on one calendar.
+private struct CustomRangeSheet: View {
+    @Environment(\.dismiss) private var dismiss
+    @State private var range: ReportingDateRange
+    private let apply: (ReportingDateRange) -> Void
+
+    init(range: ReportingDateRange, apply: @escaping (ReportingDateRange) -> Void) {
+        // A span running past today would compare against days that cannot hold figures.
+        let today = Calendar.current.startOfDay(for: Date())
+        _range = State(initialValue: ReportingDateRange(start: min(range.start, today),
+                                                        end: min(range.end, today)))
+        self.apply = apply
+    }
+
+    var body: some View {
+        NavigationStack {
+            ScrollView {
+                VStack(spacing: 20) {
+                    CalendarRangePicker(range: $range)
+
+                    // The one thing a custom span does differently is what it measures
+                    // against, so it is spelled out before the dates are committed.
+                    VStack(spacing: 0) {
+                        summaryRow("Length", lengthDescription)
+                        Divider()
+                        summaryRow("Compares with", comparisonDescription)
+                    }
+                    .background(Color.secondary.opacity(0.1), in: RoundedRectangle(cornerRadius: 12))
+                }
+                .padding(.horizontal, 20)
+                .padding(.vertical, 12)
+            }
+            .navigationTitle("Custom date")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel") { dismiss() }
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Apply") {
+                        apply(range)
+                        dismiss()
+                    }
+                }
+            }
+        }
+    }
+
+    private func summaryRow(_ title: String, _ value: String) -> some View {
+        HStack {
+            Text(title)
+            Spacer()
+            Text(value)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.trailing)
+        }
+        .font(.subheadline)
+        .padding(.horizontal, 14)
+        .padding(.vertical, 12)
+        .accessibilityElement(children: .combine)
+    }
+
+    private var dayCount: Int {
+        (Calendar.current.dateComponents([.day], from: range.start, to: range.end).day ?? 0) + 1
+    }
+
+    private var lengthDescription: String {
+        dayCount == 1 ? "1 day" : "\(dayCount) days"
+    }
+
+    private var comparisonDescription: String {
+        guard let preceding = Calendar.current.precedingSpan(matching: range) else { return "—" }
+        return preceding.description
     }
 }

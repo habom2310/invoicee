@@ -223,7 +223,7 @@ final class ProfitAnalyticsViewModel: ObservableObject {
     // MARK: - Aggregation
 
     private func recomputeMetrics() {
-        summary = selection.range.map(summary(for:)) ?? ProfitSummary()
+        summary = summary(for: selection.range)
         monthlyBreakdown = selection.period == .year ? breakdown(forYear: selection.year) : []
     }
 

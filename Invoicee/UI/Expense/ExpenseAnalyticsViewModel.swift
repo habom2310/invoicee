@@ -234,7 +234,7 @@ final class ExpenseAnalyticsViewModel: ObservableObject {
     }
 
     private func filteredInvoices() -> [CapturedInvoice] {
-        guard let range = selection.range else { return [] }
+        let range = selection.range
         return invoices
             .filter { calendar.isDay($0.date, in: range) }
             .sorted { $0.date > $1.date }

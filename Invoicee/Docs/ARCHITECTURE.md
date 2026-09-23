@@ -33,7 +33,7 @@ Invoicee/
         CapturedInvoice.swift       # Invoice, ManualInvoiceData, ManualInvoiceItem
         ExpenseMetric.swift         # Total vs Our Amount
         ReportingPeriod.swift       # Day/Week/Month/Year + Calendar range helpers
-        ReportingPeriodSelection.swift  # A period + the anchor date it sits on
+        ReportingPeriodSelection.swift  # A period + the range of days it covers
       Stores/
         InvoiceArchive.swift        # Single source of truth for invoices
         InvoiceCategoryStore.swift  # Categories + supplier→category memory
@@ -78,7 +78,8 @@ Invoicee/
       CSVExportController.swift     # Shared "build CSV → save sheet → mirror to Drive"
       MonthYearPickerSheet.swift
       ReportingControls.swift       # WarningSection
-      ReportingPeriodSelector.swift # Shared period control + timeframe sheet
+      ReportingPeriodSelector.swift # Shared period control, timeframe + custom date sheets
+      CalendarRangePicker.swift     # Month grid for picking a custom span in one pass
     Invoice/
       InvoiceTabView.swift
       InvoiceCaptureSheet.swift     # Camera / photo / PDF capture
@@ -177,27 +178,45 @@ all twelve.
 ## How the reporting tabs choose a period
 
 All three navigate rather than pick, and all three navigate **together**.
-`ReportingPeriodSelection` pairs a `ReportingPeriod` with an **anchor date**, and
-`ReportingPeriodSelector` — one control, shared — steps that anchor one whole
-`spanComponent` back or forward, or opens the timeframe sheet to switch between Today,
-This week, This month and This year. Each view model owns a single
+`ReportingPeriodSelection` holds a `ReportingPeriod` and the **range** it covers, and
+`ReportingPeriodSelector` — one control, shared — steps that range one span back or
+forward, or opens the timeframe sheet to switch between Today, This week, This month,
+This year and a custom date range. Each view model owns a single
 `@Published var selection`, recomputes from it, and mirrors it through
 `ReportingPeriodStore`: the three tabs answer questions about the same stretch of
 trading, so choosing a period on any one of them moves the other two.
 
+`range` is stored rather than derived, because a custom span is the user's own dates and
+no anchor arithmetic would produce it. For every other period the range comes from the
+anchor, and `anchor` is simply `range.start`.
+
 Two invariants make the arithmetic safe:
 
-- The anchor is always the **first day of its period**, otherwise stepping back from a
-  31st would land on a 28th and stay there.
-- Forward travel stops at the period in progress, since nothing can be recorded past
-  today.
+- A preset's range always starts on the **first day of its period**, otherwise stepping
+  back from a 31st would land on a 28th and stay there.
+- Forward travel stops at the span in progress, since nothing can be recorded past today.
 
-`precedingRange(for:matching:)` is what a period is measured against. A period still in
-progress compares like for like — on a Wednesday, "this week" measures against last week
-up to *its* Wednesday — while a finished one compares against the whole of the period
-before it. A day is the exception: it compares against the same weekday a week earlier
-(`comparisonComponent`), because takings swing too hard between weekdays for yesterday to
-mean anything. Only Revenue renders that comparison today; the type is screen-agnostic.
+### What each period is measured against
+
+`precedingRange(for:matching:)` answers this, and the rule differs by kind:
+
+- A **period still in progress** compares like for like — on a Wednesday, "this week"
+  measures against last week up to *its* Wednesday.
+- A **finished period** compares against the whole of the period before it.
+- A **day** compares against the same weekday a week earlier (`comparisonComponent`),
+  because takings swing too hard between weekdays for yesterday to mean anything.
+- A **custom span** compares against the same number of days immediately before it
+  (`precedingSpan(matching:)`): one day against the day before, ten days against the ten
+  before those. Nothing is "in progress" there — the user chose the dates — and a step
+  back lands exactly on the span it was comparing with.
+
+A custom span is picked on `CalendarRangePicker`, one month grid rather than a start and
+an end field. A tap sets the start, the next completes the span, and a tap after that
+starts over from the day tapped — so there is no mode to explain and no way to leave a
+half-finished pair behind. Days after today are not selectable, since a span running into
+the future would compare against days that cannot hold figures.
+
+Only Revenue renders that comparison today; the type is screen-agnostic.
 
 The invoice list is the one screen that still *picks*, and it sits outside that share. It
 drives its own `InvoiceMonthStore` through `MonthYearPickerSheet`, clamping onto
